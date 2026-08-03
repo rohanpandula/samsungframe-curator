@@ -32,6 +32,13 @@ from curator.hashing import sha256_hex
 from curator.ingest.decode import DecodeError, decode_image
 from curator.ingest.pipeline import IngestPipeline
 from curator.ingest.report import IngestReport, ReportEntry, ReportIssue
+from fixture_library import (
+    CORRUPT_FILENAME,
+    RAW_FILENAMES,
+    TOTAL_CLUSTERS,
+    TOTAL_FILES,
+    build_fixture,
+)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -336,3 +343,145 @@ def _count(catalog: Catalog, table: str) -> int:
 def _content_hashes(catalog: Catalog) -> set[str]:
     rows = catalog.db.execute("SELECT sha256 FROM content ORDER BY sha256").fetchall()
     return {r[0] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# T05: full 50-file / 30-cluster fixture verification (S05 shared fixture)
+# ---------------------------------------------------------------------------
+
+
+class TestFiftyFileFixture:
+    """End-to-end verification over the deterministic 50-file / 30-cluster fixture.
+
+    This is the slice acceptance surface: the shared S05 fixture ingests to
+    exactly 30 unique clusters with documented exact/near/RAW/corrupt counts and
+    the ``SELECT COUNT(DISTINCT cluster_id) = 30`` contract.
+    """
+
+    def _report(self, tmp_path, data_root, resume: bool = False):
+        from curator.connectors import LocalConnector
+
+        build = build_fixture(tmp_path / "fixture")
+        catalog = Catalog(data_root=data_root)
+        report = IngestPipeline(LocalConnector(build.root), catalog=catalog).run(
+            resume=resume
+        )
+        return report, build
+
+    def test_ingests_50_files_into_30_clusters(self, tmp_path, data_root):
+        report, build = self._report(tmp_path, data_root)
+
+        # Documented arithmetic (fixture spec).
+        assert build.total_files == TOTAL_FILES == 50
+        assert report.total_enumerated == 50
+        assert report.indexed_count == 47
+        assert report.unique_clusters == TOTAL_CLUSTERS == 30
+        assert report.exact_clusters == 5
+        assert report.near_clusters == 8  # 5 resize + 3 near families
+        assert report.unsupported_count == 2
+        assert report.corrupt_count == 1
+        assert report.error_count == 0
+        assert len(report.entries) == 47
+        assert len(report.failures) == 3
+
+    def test_acceptance_distinct_cluster_count_equals_30(self, tmp_path, data_root):
+        report, build = self._report(tmp_path, data_root)
+        # The acceptance: unique entries are distinct dedup clusters.
+        from curator.catalog import Catalog
+
+        catalog = Catalog(data_root=data_root)
+        distinct = catalog.count_unique_clusters()
+        assert distinct == 30
+        row = catalog.db.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM catalog_entries"
+            " WHERE cluster_id IS NOT NULL"
+        ).fetchone()
+        assert int(row[0]) == 30
+
+    def test_cluster_sizes_match_fixture_families(self, tmp_path, data_root):
+        report, _ = self._report(tmp_path, data_root)
+        grouped = _by_cluster(report.entries)
+        sizes = sorted(len(v) for v in grouped.values())
+        # 4 exact triples (3,3,3,3) + 1 exact pair (2) + 5 resize pairs + 3 near
+        # pairs + 17 singles.
+        assert sizes == ([1] * 17 + [2] * 9 + [3] * 4)
+
+    def test_raw_unsupported_and_corrupt_preserved(self, tmp_path, data_root):
+        report, build = self._report(tmp_path, data_root)
+
+        unsupported = [f for f in report.failures if f.status == "unsupported"]
+        assert len(unsupported) == 2
+        assert {Path(f.asset_id).name for f in unsupported} == set(RAW_FILENAMES)
+        assert all(f.media_type in (".cr2", ".dng") for f in unsupported)
+
+        corrupt = [f for f in report.failures if f.status == "corrupt"]
+        assert len(corrupt) == 1
+        assert Path(corrupt[0].asset_id).name == CORRUPT_FILENAME
+        assert corrupt[0].error and "failed to decode" in corrupt[0].error
+
+    def test_resize_best_original_is_highest_resolution(self, tmp_path, data_root):
+        report, build = self._report(tmp_path, data_root)
+        by_name = {Path(e.asset_id).name: e for e in report.entries}
+
+        for resized in build.resize_best_originals:
+            entry = by_name[resized]
+            # The 2x resized member is the highest-resolution -> best_original.
+            assert entry.best_original is True
+            assert entry.phash_distance == 0
+            assert (entry.width, entry.height) == (384, 384)
+            # Its base sits in the same cluster but is NOT best-original.
+            base = resized.replace("_resized", "_base")
+            base_entry = by_name[base]
+            assert base_entry.cluster_id == entry.cluster_id
+            assert base_entry.best_original is False
+            assert base_entry.dupe_of == entry.asset_id
+
+    def test_every_cluster_has_exactly_one_best_original(self, tmp_path, data_root):
+        report, _ = self._report(tmp_path, data_root)
+        for cid, members in _by_cluster(report.entries).items():
+            bests = [m for m in members if m.best_original]
+            assert len(bests) == 1
+            assert bests[0].dupe_of is None
+
+    def test_reingest_idempotent_and_hashes_unchanged(self, tmp_path, data_root):
+        from curator.connectors import LocalConnector
+
+        build = build_fixture(tmp_path / "fixture")
+        catalog = Catalog(data_root=data_root)
+        connector = LocalConnector(build.root)
+
+        IngestPipeline(connector, catalog=catalog).run()
+        entries_first = _count(catalog, "catalog_entries")
+        hashes_first = _content_hashes(catalog)
+
+        IngestPipeline(connector, catalog=catalog).run()
+        entries_second = _count(catalog, "catalog_entries")
+        hashes_second = _content_hashes(catalog)
+
+        assert entries_first == 47
+        assert entries_second == entries_first  # idempotent re-ingest
+        assert hashes_first == hashes_second  # content byte-hashes unchanged
+
+    def test_journal_50_rows_terminal_statuses(self, tmp_path, data_root):
+        report, _ = self._report(tmp_path, data_root)
+        from curator.catalog import Catalog
+
+        catalog = Catalog(data_root=data_root)
+        rows = catalog.db.execute(
+            "SELECT status, error FROM ingest_journal ORDER BY id"
+        ).fetchall()
+        assert len(rows) == 50
+        statuses = [r[0] for r in rows]
+        assert statuses.count("indexed") == 47
+        assert statuses.count("unsupported") == 2
+        assert statuses.count("corrupt") == 1
+        assert statuses.count("started") == 0  # all terminal this run
+        corrupt_row = next(r for r in rows if r[0] == "corrupt")
+        assert corrupt_row[1] and "failed to decode" in corrupt_row[1]
+
+    def test_report_is_json_serializable_over_full_fixture(self, tmp_path, data_root):
+        report, _ = self._report(tmp_path, data_root)
+        payload = json.loads(report.to_json())
+        assert payload["unique_clusters"] == 30
+        assert len(payload["entries"]) == 47
+        assert len(payload["failures"]) == 3

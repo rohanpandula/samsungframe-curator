@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from curator import cli, db, schema
 from curator.hashing import sha256_hex
+from fixture_library import CORRUPT_FILENAME, RAW_FILENAMES, build_fixture
 
 
 def test_init_creates_migrated_wal_db(data_root, capsys):
@@ -121,3 +122,84 @@ def test_catalog_add_requires_file_argument(data_root):
     except SystemExit as exc:  # argparse exits 2 on missing required arg
         rc = exc.code
     assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# T05: `curator ingest PATH` CLI
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_reports_30_clusters(data_root, tmp_path, capsys):
+    folder = build_fixture(tmp_path / "fixture").root
+    rc = cli.main(["ingest", str(folder)])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    # Demo surface: 50 files -> 30 unique clusters, exact/near counts.
+    assert "total enumerated : 50" in out
+    assert "indexed          : 47" in out
+    assert "unique clusters  : 30  (exact=5, near=8)" in out
+    assert "unsupported      : 2" in out
+    assert "corrupt          : 1" in out
+    # RAW explicit-unsupported surface (R003).
+    assert "explicit-unsupported (RAW):" in out
+    assert RAW_FILENAMES[0] in out and RAW_FILENAMES[1] in out
+    # Corrupt error preserved in the report.
+    assert "corrupt:" in out
+    assert CORRUPT_FILENAME in out
+    assert "failed to decode" in out
+    # At least one best-original flag printed with phash distance.
+    assert "best=" in out
+    assert "phash_dist=0" in out
+
+
+def test_ingest_persists_catalog_and_journal(data_root, tmp_path):
+    folder = build_fixture(tmp_path / "fixture").root
+    assert cli.main(["ingest", str(folder)]) == 0
+
+    conn = db.connect()
+    try:
+        entries = conn.execute("SELECT COUNT(*) FROM catalog_entries").fetchone()[0]
+        distinct = conn.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM catalog_entries"
+            " WHERE cluster_id IS NOT NULL"
+        ).fetchone()[0]
+        journal = conn.execute("SELECT COUNT(*) FROM ingest_journal").fetchone()[0]
+        unsup = conn.execute(
+            "SELECT COUNT(*) FROM ingest_journal WHERE status='unsupported'"
+        ).fetchone()[0]
+        corrupt = conn.execute(
+            "SELECT COUNT(*) FROM ingest_journal WHERE status='corrupt'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert entries == 47
+    assert distinct == 30
+    assert journal == 50
+    assert unsup == 2
+    assert corrupt == 1
+
+
+def test_ingest_resume_is_idempotent(data_root, tmp_path, capsys):
+    folder = build_fixture(tmp_path / "fixture").root
+    assert cli.main(["ingest", str(folder)]) == 0
+    capsys.readouterr()  # drain
+
+    assert cli.main(["ingest", "--resume", str(folder)]) == 0
+    out = capsys.readouterr().out
+    assert "unique clusters  : 30" in out
+
+    conn = db.connect()
+    try:
+        entries = conn.execute("SELECT COUNT(*) FROM catalog_entries").fetchone()[0]
+    finally:
+        conn.close()
+    assert entries == 47  # unchanged after resume re-ingest
+
+
+def test_ingest_missing_dir_returns_error(data_root, capsys):
+    rc = cli.main(["ingest", "/no/such/dir"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error" in err.lower()
