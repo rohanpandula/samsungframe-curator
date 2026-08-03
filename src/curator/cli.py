@@ -22,12 +22,14 @@ honors that environment variable wherever it points the data root.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from curator import db
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
+from curator.consolidate import ConsolidationExecutor, ConsolidationPlan, build_plan
 from curator.errors import CuratorError
 from curator.ingest.pipeline import IngestPipeline
 from curator.ingest.report import IngestReport
@@ -60,6 +62,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         action="store_true",
         help="resume from the ingest_journal: skip already-indexed assets",
+    )
+
+    consolidate = sub.add_parser(
+        "consolidate",
+        help="consolidate a legacy SSD folder (dry-run plan / non-destructive "
+        "execute + archive)",
+    )
+    consolidate.add_argument("path", help="path to the legacy source folder")
+    mode = consolidate.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="inventory the source into an 8-group consolidation plan (default)",
+    )
+    mode.add_argument(
+        "--execute",
+        action="store_true",
+        help="stage/verify/promote every source file into <root>/library/",
+    )
+    consolidate.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume a prior execute from its consolidation_journal checkpoint",
+    )
+    consolidate.add_argument(
+        "--archive",
+        action="store_true",
+        help="after execute, move the fully-consolidated source under <root>/archive/",
+    )
+    consolidate.add_argument(
+        "--json",
+        action="store_true",
+        help="emit structured JSON instead of a human-readable report",
     )
 
     return parser
@@ -159,6 +194,122 @@ def _format_report(report: IngestReport) -> str:
     return "\n".join(lines)
 
 
+def _consolidate(args: argparse.Namespace) -> int:
+    """Run the S03 consolidate surface: dry-run plan or non-destructive execute.
+
+    ``--dry-run`` (the default) inventories the source directory into an
+    :class:`ConsolidationPlan` covering all 8 R002 groups and prints a
+    human-readable (or ``--json``) report. ``--execute`` runs the
+    :class:`ConsolidationExecutor` to stage/verify/promote every source file,
+    optionally resuming from a prior run's ``consolidation_journal`` checkpoint
+    (``--resume``) and requesting the explicitly-approved archive step
+    (``--archive``) once every file reached ``promoted``.
+    """
+    source = Path(args.path).resolve()
+    if not source.is_dir():
+        raise CuratorError(f"consolidate source is not a directory: {args.path!r}")
+    if not args.execute:
+        return _consolidate_dry_run(args, source)
+    return _consolidate_execute(args, source)
+
+
+def _consolidate_dry_run(args: argparse.Namespace, source: Path) -> int:
+    """Inventory *source* into a plan and report it (human-readable or JSON)."""
+    plan = build_plan(source)
+    if args.json:
+        print(plan.to_json())
+    else:
+        print(_format_plan(plan))
+    return 0
+
+
+def _consolidate_execute(args: argparse.Namespace, source: Path) -> int:
+    """Execute (and optionally archive) the consolidation of *source*."""
+    executor = ConsolidationExecutor(source)
+    result = executor.execute(resume=args.resume)
+    archive_path: Path | None = None
+    if args.archive:
+        archive_path = executor.archive()
+    if args.json:
+        payload = result.to_dict()
+        if archive_path is not None:
+            payload["archive_path"] = str(archive_path)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(_format_result(result))
+        if archive_path is not None:
+            print(f"  archived to {archive_path}")
+    return 0
+
+
+def _format_plan(plan: ConsolidationPlan) -> str:
+    """Render a :class:`ConsolidationPlan` as a human-readable dry-run report."""
+    counts = plan.group_counts()
+    lines = [
+        f"consolidate {plan.source_path} (dry-run)",
+        f"  exact_dupes          : {counts['exact_dupes']}",
+        f"  near_dupes           : {counts['near_dupes']}",
+        f"  higher_res_originals : {counts['higher_res_originals']}",
+        f"  filename_collisions  : {counts['filename_collisions']}",
+        f"  panels               : {counts['panels']}",
+        f"  sidecars             : {counts['sidecars']}",
+        f"  corrupt              : {counts['corrupt']}",
+        f"  missing_date         : {counts['missing_date']}",
+    ]
+
+    if plan.exact_dupes:
+        lines.append("")
+        lines.append("exact_dupes:")
+        for group in plan.exact_dupes:
+            lines.append("  " + ", ".join(group))
+    if plan.near_dupes:
+        lines.append("")
+        lines.append("near_dupes:")
+        for group in plan.near_dupes:
+            lines.append("  " + ", ".join(group))
+    if plan.higher_res_originals:
+        lines.append("")
+        lines.append("higher_res_originals:")
+        lines.extend(f"  {rel}" for rel in plan.higher_res_originals)
+    if plan.filename_collisions:
+        lines.append("")
+        lines.append("filename_collisions:")
+        for group in plan.filename_collisions:
+            lines.append("  " + ", ".join(group))
+    if plan.panels:
+        lines.append("")
+        lines.append("panels:")
+        lines.extend(f"  {rel}" for rel in plan.panels)
+    if plan.sidecars:
+        lines.append("")
+        lines.append("sidecars:")
+        lines.extend(f"  {rel}" for rel in plan.sidecars)
+    if plan.corrupt:
+        lines.append("")
+        lines.append("corrupt:")
+        for entry in plan.corrupt:
+            lines.append(f"  {entry.get('path')}  -> {entry.get('error')}")
+    if plan.missing_date:
+        lines.append("")
+        lines.append("missing_date:")
+        lines.extend(f"  {rel}" for rel in plan.missing_date)
+    return "\n".join(lines)
+
+
+def _format_result(result) -> str:
+    """Render a :class:`ConsolidationResult` as a human-readable execute report."""
+    return "\n".join(
+        [
+            f"consolidate {result.source_path} (execute)",
+            f"  staged         : {result.staged}",
+            f"  verified       : {result.verified}",
+            f"  promoted       : {result.promoted}",
+            f"  skipped        : {result.skipped}",
+            f"  unique library : {result.unique_library_files}",
+        ]
+    )
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Route parsed args to the matching subcommand handler."""
     if args.command == "catalog":
@@ -172,6 +323,8 @@ def _dispatch(args: argparse.Namespace) -> int:
             return 0
     if args.command == "ingest":
         return _ingest(args.path, resume=args.resume)
+    if args.command == "consolidate":
+        return _consolidate(args)
     # Unreachable given required subparsers; defensive fallback.
     return 2
 

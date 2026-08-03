@@ -11,6 +11,13 @@ in-process via :func:`curator.cli.main` under a monkeypatched env.
 
 from __future__ import annotations
 
+import json
+
+from consolidate_fixture import (
+    CONSOLIDATED_FILES,
+    UNIQUE_LIBRARY_FILES,
+    build_consolidation_fixture,
+)
 from curator import cli, db, schema
 from curator.hashing import sha256_hex
 from fixture_library import CORRUPT_FILENAME, RAW_FILENAMES, build_fixture
@@ -200,6 +207,148 @@ def test_ingest_resume_is_idempotent(data_root, tmp_path, capsys):
 
 def test_ingest_missing_dir_returns_error(data_root, capsys):
     rc = cli.main(["ingest", "/no/such/dir"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# T4: `curator consolidate` (dry-run plan / execute / resume / archive)
+# ---------------------------------------------------------------------------
+
+
+def _legacy_ssd(tmp_path):
+    """Build the deterministic consolidation fixture; return its source folder."""
+    return build_consolidation_fixture(tmp_path / "src").root
+
+
+PLAN_LABELS = (
+    "exact_dupes",
+    "near_dupes",
+    "higher_res_originals",
+    "filename_collisions",
+    "panels",
+    "sidecars",
+    "corrupt",
+    "missing_date",
+)
+
+
+def test_consolidate_dry_run_reports_all_eight_groups(data_root, tmp_path, capsys):
+    src = _legacy_ssd(tmp_path)
+    rc = cli.main(["consolidate", "--dry-run", str(src)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Every group label present in the human-readable report.
+    for label in PLAN_LABELS:
+        assert label in out, f"missing group label {label}"
+    # Pinned fixture arithmetic.
+    assert "exact_dupes          : 3" in out
+    assert "near_dupes           : 2" in out
+    assert "higher_res_originals : 1" in out
+    assert "filename_collisions  : 2" in out
+    assert "panels               : 1" in out
+    assert "sidecars             : 1" in out
+    assert "corrupt              : 1" in out
+    assert "missing_date         : 1" in out
+
+
+def test_consolidate_dry_run_is_default_mode(data_root, tmp_path, capsys):
+    """No mode flag -> dry-run (the demo's default surface)."""
+    src = _legacy_ssd(tmp_path)
+    assert cli.main(["consolidate", str(src)]) == 0
+    out = capsys.readouterr().out
+    assert "(dry-run)" in out
+    assert "exact_dupes          : 3" in out
+
+
+def test_consolidate_dry_run_json_group_counts(data_root, tmp_path, capsys):
+    src = _legacy_ssd(tmp_path)
+    assert cli.main(["consolidate", "--dry-run", "--json", str(src)]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    # to_json() serializes full group membership (mirrors IngestReport); derive
+    # the pinned counts from the structure rather than re-deriving arithmetic.
+    assert sum(len(g) for g in doc["exact_dupes"]) == 3
+    assert sum(len(g) for g in doc["near_dupes"]) == 2
+    assert len(doc["higher_res_originals"]) == 1
+    assert sum(len(g) for g in doc["filename_collisions"]) == 2
+    assert doc["panels"] == ["2024-03-01_panel.jpg"]
+    assert doc["sidecars"] == ["2024-03-01_panel.xmp"]
+    assert len(doc["corrupt"]) == 1 and doc["corrupt"][0]["path"] == "broken.jpg"
+    assert doc["missing_date"] == ["nodate.jpg"]
+
+
+def test_consolidate_execute_promotes_all_sources_untouched(data_root, tmp_path, capsys):
+    src = _legacy_ssd(tmp_path)
+    rc = cli.main(["consolidate", "--execute", str(src)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "promoted       : 11" in out
+    assert f"unique library : {UNIQUE_LIBRARY_FILES}" in out
+    # Library materialized and content-addressed (9 distinct blobs).
+    lib = data_root / "library"
+    assert lib.is_dir()
+    n_blobs = sum(1 for p in lib.rglob("*") if p.is_file())
+    assert n_blobs == UNIQUE_LIBRARY_FILES
+    # Sources completely untouched: every fixture file still present at source.
+    for rel in (
+        "2024-01-01_exact.jpg",
+        "2024-01-02_near_base.jpg",
+        "2024-03-01_panel.jpg",
+        "2024-03-01_panel.xmp",
+        "a/2024-02-01_photo.jpg",
+        "b/2024-02-01_photo.jpg",
+        "broken.jpg",
+        "nodate.jpg",
+    ):
+        assert (src / rel).exists(), f"source file removed: {rel}"
+
+
+def test_consolidate_execute_json(data_root, tmp_path, capsys):
+    src = _legacy_ssd(tmp_path)
+    assert cli.main(["consolidate", "--execute", "--json", str(src)]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["staged"] == CONSOLIDATED_FILES
+    assert doc["verified"] == CONSOLIDATED_FILES
+    assert doc["promoted"] == CONSOLIDATED_FILES
+    assert doc["skipped"] == 0
+    assert doc["unique_library_files"] == UNIQUE_LIBRARY_FILES
+    assert doc["errors"] == []
+
+
+def test_consolidate_execute_resume_is_idempotent(data_root, tmp_path, capsys):
+    src = _legacy_ssd(tmp_path)
+    assert cli.main(["consolidate", "--execute", str(src)]) == 0
+    capsys.readouterr()  # drain
+
+    # A fresh run with --resume skips every already-promoted file.
+    assert cli.main(["consolidate", "--execute", "--resume", str(src)]) == 0
+    out = capsys.readouterr().out
+    assert "skipped        : 11" in out
+    assert "promoted       : 0" in out
+    # Library count unchanged (content-addressed convergence holds on resume).
+    lib = data_root / "library"
+    n_blobs = sum(1 for p in lib.rglob("*") if p.is_file())
+    assert n_blobs == UNIQUE_LIBRARY_FILES
+
+
+def test_consolidate_execute_archive_moves_source(data_root, tmp_path, capsys):
+    src = _legacy_ssd(tmp_path)
+    assert cli.main(["consolidate", "--execute", "--archive", str(src)]) == 0
+    out = capsys.readouterr().out
+    assert "promoted       : 11" in out
+    assert "archived to" in out
+    # The explicitly-approved source folder moved intact beneath <root>/archive/.
+    archived = data_root / "archive" / "legacy-ssd"
+    assert archived.is_dir()
+    assert (archived / "2024-01-01_exact.jpg").exists()
+    assert (archived / "2024-03-01_panel.xmp").exists()
+    # Source folder no longer at its original location (it was relocated intact).
+    assert not src.exists()
+
+
+def test_consolidate_missing_dir_returns_error(data_root, tmp_path, capsys):
+    rc = cli.main(["consolidate", "/no/such/folder"])
     assert rc == 1
     err = capsys.readouterr().err
     assert "error" in err.lower()
