@@ -170,3 +170,103 @@ def test_catalog_auto_migrates(data_root):
         assert cat.get_by_source("c", "a") is not None
     finally:
         cat.db.close()
+
+
+def test_add_source_writes_v2_dedup_columns(catalog):
+    """cluster_id/dupe_of/best_original/quality_flags round-trip on add_source."""
+    digest = catalog.add_source(
+        "conn-local",
+        "asset-cluster",
+        b"dedup-bytes",
+        metadata={
+            "cluster_id": "clu-abc",
+            "dupe_of": "asset-canonical",
+            "best_original": True,
+            "quality_flags": {"highest_res": True, "kind": "near"},
+        },
+    )
+    entry = catalog.get_by_source("conn-local", "asset-cluster")
+    assert entry["sha256"] == digest
+    assert entry["cluster_id"] == "clu-abc"
+    assert entry["dupe_of"] == "asset-canonical"
+    assert entry["best_original"] == 1
+    assert entry["quality_flags"] == '{"highest_res": true, "kind": "near"}'
+
+
+def test_add_source_defaults_cluster_fields_null(catalog):
+    """Without dedup metadata the new columns stay NULL (backward compatible)."""
+    catalog.add_source("conn-local", "asset-plain", b"plain-bytes")
+    entry = catalog.get_by_source("conn-local", "asset-plain")
+    assert entry["cluster_id"] is None
+    assert entry["dupe_of"] is None
+    assert entry["best_original"] is None
+    assert entry["quality_flags"] is None
+
+
+def test_image_signature_roundtrip(catalog):
+    """set_image_signature / get_image_signature persist dimensions + phash."""
+    digest = catalog.add_source("conn-local", "asset-img", b"image-bytes")
+    catalog.set_image_signature(digest, width=1920, height=1080, phash="aabbcc")
+    sig = catalog.get_image_signature(digest)
+    assert sig is not None
+    assert sig["sha256"] == digest
+    assert sig["width"] == 1920
+    assert sig["height"] == 1080
+    assert sig["phash"] == "aabbcc"
+
+
+def test_image_signature_upsert_is_idempotent(catalog):
+    """Re-signing the same hash overwrites in place (single row)."""
+    digest = catalog.add_source("conn-local", "asset-img", b"image-bytes")
+    catalog.set_image_signature(digest, width=1, height=1, phash="x")
+    catalog.set_image_signature(digest, width=200, height=100, phash="y")
+    assert catalog.db.execute("SELECT COUNT(*) FROM content_image").fetchone()[0] == 1
+    sig = catalog.get_image_signature(digest)
+    assert sig["width"] == 200
+    assert sig["phash"] == "y"
+
+
+def test_image_signature_requires_content_row(catalog):
+    """Setting a signature for a hash with no content row violates the FK."""
+    with pytest.raises(CatalogError):
+        catalog.set_image_signature("f" * 64, width=10, height=10)
+
+
+def test_get_image_signature_missing_returns_none(catalog):
+    assert catalog.get_image_signature("a" * 64) is None
+
+
+def test_count_unique_clusters(catalog):
+    """count_unique_clusters counts distinct non-NULL cluster_ids only."""
+    for i in range(3):
+        catalog.add_source(
+            f"conn-{i}",
+            f"asset-{i}",
+            f"bytes-{i}".encode(),
+            metadata={"cluster_id": f"clu-{i % 2}"},
+        )
+    catalog.add_source("conn-x", "asset-x", b"no-cluster")  # cluster_id NULL
+    assert catalog.count_unique_clusters() == 2
+
+
+def test_get_by_cluster(catalog):
+    """get_by_cluster returns every member entry for a cluster."""
+    catalog.add_source("c", "a1", b"one", metadata={"cluster_id": "clu-9"})
+    catalog.add_source("c", "a2", b"two", metadata={"cluster_id": "clu-9"})
+    catalog.add_source("c", "other", b"three", metadata={"cluster_id": "clu-other"})
+    members = catalog.get_by_cluster("clu-9")
+    assert {m["asset_id"] for m in members} == {"a1", "a2"}
+
+
+def test_get_by_phash(catalog):
+    """get_by_phash resolves entries whose content hash has a matching signature."""
+    d1 = catalog.add_source("c", "a1", b"phash-bytes")
+    d2 = catalog.add_source("c", "a2", b"other-bytes")
+    catalog.set_image_signature(d1, width=4, height=4, phash="hash-one")
+    catalog.set_image_signature(d2, width=4, height=4, phash="hash-two")
+    hits = catalog.get_by_phash("hash-one")
+    assert [e["asset_id"] for e in hits] == ["a1"]
+
+
+def test_get_by_phash_no_match_is_empty(catalog):
+    assert catalog.get_by_phash("no-such-phash") == []

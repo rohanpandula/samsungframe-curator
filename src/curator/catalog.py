@@ -22,6 +22,7 @@ the ContentStore; SQLite/database problems are wrapped and re-raised as
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ from curator import db as _db
 from curator.content_store import ContentStore
 from curator.errors import CatalogError
 
-# Column order of ``SELECT *`` on catalog_entries (matches schema v1 DDL).
+# Column order of ``SELECT *`` on catalog_entries (matches schema v1 + v2 DDL).
 _ENTRY_COLUMNS = [
     "id",
     "connector_id",
@@ -41,7 +42,15 @@ _ENTRY_COLUMNS = [
     "quality_reason",
     "created_at",
     "updated_at",
+    # v2 dedup/consolidation columns (migration 2).
+    "cluster_id",
+    "dupe_of",
+    "quality_flags",
+    "best_original",
 ]
+
+# Column order of ``SELECT *`` on content_image (schema v2 DDL).
+_IMAGE_COLUMNS = ["sha256", "width", "height", "phash", "created_at"]
 
 _TIMESTAMP = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
@@ -90,6 +99,9 @@ class Catalog:
         - ``revision`` — caller-supplied revision for the entry (default: the content
           SHA-256, so identical bytes + asset map to one revision).
         - ``quality_score`` / ``quality_reason`` — initial quality flags.
+        - ``cluster_id`` / ``dupe_of`` — dedup-cluster identity for this entry.
+        - ``best_original`` — 1/True when this entry is its cluster's best-original.
+        - ``quality_flags`` — a dict (serialized to JSON) of derived flags.
         """
         metadata = metadata or {}
         digest = self.content.put(data)  # StorageError propagates untouched
@@ -97,6 +109,11 @@ class Catalog:
         revision = metadata.get("revision", digest)
         quality_score = metadata.get("quality_score")
         quality_reason = metadata.get("quality_reason")
+        cluster_id = metadata.get("cluster_id")
+        dupe_of = metadata.get("dupe_of")
+        best_original = 1 if metadata.get("best_original") else None
+        qf = metadata.get("quality_flags")
+        quality_flags = json.dumps(qf) if isinstance(qf, dict) else (qf if qf is not None else None)
 
         try:
             self.db.execute(
@@ -114,14 +131,30 @@ class Catalog:
             )
             self.db.execute(
                 "INSERT INTO catalog_entries"
-                " (connector_id, asset_id, revision, sha256, quality_score, quality_reason)"
-                " VALUES (?, ?, ?, ?, ?, ?)"
+                " (connector_id, asset_id, revision, sha256, quality_score, quality_reason,"
+                "  cluster_id, dupe_of, quality_flags, best_original)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(connector_id, asset_id, revision) DO UPDATE SET"
                 "   sha256 = excluded.sha256,"
                 "   quality_score = excluded.quality_score,"
                 "   quality_reason = excluded.quality_reason,"
+                "   cluster_id = excluded.cluster_id,"
+                "   dupe_of = excluded.dupe_of,"
+                "   quality_flags = excluded.quality_flags,"
+                "   best_original = excluded.best_original,"
                 f"   updated_at = {_TIMESTAMP}",
-                (connector_id, asset_id, revision, digest, quality_score, quality_reason),
+                (
+                    connector_id,
+                    asset_id,
+                    revision,
+                    digest,
+                    quality_score,
+                    quality_reason,
+                    cluster_id,
+                    dupe_of,
+                    quality_flags,
+                    best_original,
+                ),
             )
             self.db.commit()
         except sqlite3.Error as exc:
@@ -200,6 +233,75 @@ class Catalog:
             raise CatalogError(
                 f"failed to update quality flags for {connector_id}/{asset_id}: {exc}"
             ) from exc
+
+    def set_image_signature(
+        self,
+        sha256: str,
+        width: int,
+        height: int,
+        phash: str | None = None,
+    ) -> None:
+        """Upsert the durable image signature (dimensions + phash) for *sha256*.
+
+        ``content_image`` is keyed by the content hash, so re-ingesting the same
+        bytes overwrites in place (idempotent). Requires a ``content`` row to exist
+        (foreign key); raises :class:`CatalogError` otherwise.
+        """
+        try:
+            self.db.execute(
+                "INSERT INTO content_image(sha256, width, height, phash)"
+                " VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(sha256) DO UPDATE SET"
+                "   width = excluded.width,"
+                "   height = excluded.height,"
+                "   phash = excluded.phash,"
+                f"   created_at = {_TIMESTAMP}",
+                (sha256, width, height, phash),
+            )
+            self.db.commit()
+        except sqlite3.Error as exc:
+            self.db.rollback()
+            raise CatalogError(
+                f"failed to set image signature for {sha256}: {exc}"
+            ) from exc
+
+    def get_image_signature(self, sha256: str) -> dict[str, Any] | None:
+        """Return the durable image signature for *sha256*, or ``None`` when absent."""
+        cur = self.db.execute(
+            "SELECT * FROM content_image WHERE sha256 = ?", (sha256,)
+        )
+        row = cur.fetchone()
+        return dict(zip(_IMAGE_COLUMNS, row)) if row else None
+
+    def get_by_cluster(self, cluster_id: str) -> list[dict[str, Any]]:
+        """Return all catalog entries assigned to *cluster_id*, oldest first."""
+        return self._query(
+            "SELECT * FROM catalog_entries WHERE cluster_id = ? ORDER BY id",
+            (cluster_id,),
+        )
+
+    def count_unique_clusters(self) -> int:
+        """Return the number of distinct non-NULL ``cluster_id`` values.
+
+        Used by acceptance: unique entries are defined as distinct dedup clusters.
+        """
+        row = self.db.execute(
+            "SELECT COUNT(DISTINCT cluster_id) FROM catalog_entries"
+            " WHERE cluster_id IS NOT NULL"
+        ).fetchone()
+        return int(row[0])
+
+    def get_by_phash(self, phash: str) -> list[dict[str, Any]]:
+        """Return catalog entries whose content hash has image signature *phash*.
+
+        Joins ``catalog_entries`` to ``content_image`` on sha256.
+        """
+        return self._query(
+            "SELECT e.* FROM catalog_entries e"
+            " JOIN content_image i ON i.sha256 = e.sha256"
+            " WHERE i.phash = ? ORDER BY e.id",
+            (phash,),
+        )
 
     # -- impl -------------------------------------------------------------------
 

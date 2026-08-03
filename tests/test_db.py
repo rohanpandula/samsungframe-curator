@@ -137,3 +137,40 @@ def test_migrate_wal_file_materialized(data_root):
         assert (data_root / "catalog.db").stat().st_size > 0
     finally:
         conn.close()
+
+
+def test_migration_v2_adds_dedup_columns(dbase):
+    """v2 adds the four dedup/consolidation columns to catalog_entries."""
+    cols = {r[1] for r in dbase.execute("PRAGMA table_info(catalog_entries)")}
+    for name in ("cluster_id", "dupe_of", "quality_flags", "best_original"):
+        assert name in cols, f"missing v2 column {name}"
+
+
+def test_migration_v2_creates_content_image(dbase):
+    """v2 ships the per-content-hash image-signature table with its columns."""
+    cols = {r[1] for r in dbase.execute("PRAGMA table_info(content_image)")}
+    assert {"sha256", "width", "height", "phash"} <= cols
+
+
+def test_upgrade_from_v1_to_v2(data_root):
+    """A v1-only DB upgrades in place to v2 via the linear migration runner."""
+    conn = db.connect()
+    try:
+        # Force a v1-only database: apply migration 1 and pin user_version to 1.
+        conn.executescript(schema.MIGRATIONS[0][1])
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(catalog_entries)")}
+        assert "cluster_id" not in cols
+        assert "content_image" not in db.table_names(conn)
+
+        db.migrate(conn)
+
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(catalog_entries)")}
+        assert "cluster_id" in cols
+        assert "content_image" in db.table_names(conn)
+    finally:
+        conn.close()

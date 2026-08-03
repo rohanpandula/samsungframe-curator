@@ -16,6 +16,16 @@ Table names in v1 match the Boundary Map contract surface exactly:
 - ``ingest_journal``         — append-only ingest run journal
 - ``consolidation_journal``  — append-only consolidation run journal (populated in S03)
 
+v2 (migration ``(2, ...)``) extends the boundary for S02's ingest + dedup work:
+
+- ``catalog_entries`` gains per-entry dedup columns populated by the IngestPipeline /
+  consolidation: ``cluster_id`` (opaque dedup cluster key), ``dupe_of`` (opaque id of the
+  cluster's canonical member), ``quality_flags`` (JSON blob of derived flags, e.g.
+  ``highest_res`` / ``crop_candidate``), and ``best_original`` (1 when this entry is the
+  cluster's chosen best-original, else 0/NULL).
+- ``content_image`` — a durable per-content-hash image signature table holding decoded
+  dimensions and a perceptual hash (phash) string for near-dupe clustering.
+
 Keep v1 minimal: analysis / approval / render tables are added by later slices (S02/S03),
 not here.
 """
@@ -106,15 +116,37 @@ CREATE TABLE IF NOT EXISTS consolidation_journal (
 );
 """
 
+# Migration v2 (S02 ingest + dedup): adds the dedup/consolidation columns to
+# ``catalog_entries`` and a per-content-hash image-signature table. SQLite forbids
+# adding multiple columns in a single ALTER, so each ADD COLUMN is its own
+# statement; ``executescript`` applies them in one migration step.
+SCHEMA_V2_SQL = f"""
+ALTER TABLE catalog_entries ADD COLUMN cluster_id TEXT;
+ALTER TABLE catalog_entries ADD COLUMN dupe_of TEXT;
+ALTER TABLE catalog_entries ADD COLUMN quality_flags TEXT;
+ALTER TABLE catalog_entries ADD COLUMN best_original INTEGER;
+
+-- Durable per-content-hash image signature: dimensions + perceptual hash.
+-- Rows are derived metadata, so they follow their content row via CASCADE.
+CREATE TABLE IF NOT EXISTS content_image (
+    sha256 TEXT PRIMARY KEY REFERENCES content(sha256) ON DELETE CASCADE,
+    width  INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    phash  TEXT,
+    created_at TEXT NOT NULL DEFAULT ({_TIMESTAMP})
+);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
+    (2, SCHEMA_V2_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
 SCHEMA_VERSION: int = MIGRATIONS[-1][0]
 
-# The boundary-map table set delivered by v1. Used by tests and diagnostics.
+# The boundary-map table set delivered by the migrations. Used by tests/diagnostics.
 EXPECTED_TABLES: list[str] = [
     "source_connectors",
     "source_assets",
@@ -124,4 +156,5 @@ EXPECTED_TABLES: list[str] = [
     "catalog_entries",
     "ingest_journal",
     "consolidation_journal",
+    "content_image",
 ]
