@@ -19,6 +19,7 @@ stage/verify/promote files under the canonical library root.
 
 from __future__ import annotations
 
+from curator.consolidate.executor import ConsolidationExecutor, ConsolidationResult
 from curator.consolidate.plan import (
     PANEL_DIMENSIONS,
     SIDECAR_SUFFIXES,
@@ -31,4 +32,6 @@ __all__ = [
     "SIDECAR_SUFFIXES",
     "ConsolidationPlan",
     "build_plan",
+    "ConsolidationExecutor",
+    "ConsolidationResult",
 ]

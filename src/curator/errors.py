@@ -25,3 +25,13 @@ class ConnectorError(CuratorError):
 
 class IngestError(CuratorError):
     """Raised when an ingest pipeline step fails."""
+
+
+class ConsolidationError(CuratorError):
+    """Raised when a consolidation (SSD execute/archive) step fails.
+
+    Covers the R002 failure surface: staging a source that is not a directory,
+    a staged-to-source SHA-256 verification mismatch, trying to archive a source
+    folder before every file reached ``promoted``, or archiving a folder that has
+    already been archived.
+    """
