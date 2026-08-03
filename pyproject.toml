@@ -37,7 +37,7 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "W", "UP"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 files = ["src"]
 check_untyped_defs = true
 disallow_untyped_defs = false

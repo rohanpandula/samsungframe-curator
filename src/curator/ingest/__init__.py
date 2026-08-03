@@ -19,13 +19,23 @@ from curator.ingest.clustering import (
     cluster_images,
     hamming_distance,
 )
+from curator.ingest.decode import DecodedImage, DecodeError, decode_image
+from curator.ingest.pipeline import IngestPipeline
+from curator.ingest.report import IngestReport, ReportEntry, ReportIssue
 
 __all__ = [
     "CROP_AR_TOLERANCE",
     "PHASH_NEAR_THRESHOLD",
     "Cluster",
+    "DecodeError",
+    "DecodedImage",
     "ImageItem",
+    "IngestPipeline",
+    "IngestReport",
+    "ReportEntry",
+    "ReportIssue",
     "best_original",
     "cluster_images",
+    "decode_image",
     "hamming_distance",
 ]
