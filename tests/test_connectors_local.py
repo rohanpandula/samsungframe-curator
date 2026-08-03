@@ -131,3 +131,104 @@ def test_connector_id_custom_override(tmp_path):
     folder = _make_folder(tmp_path)
     connector = LocalConnector(folder, connector_id="my-local")
     assert connector.connector_id == "my-local"
+
+
+# ---------------------------------------------------------------------------
+# T02: TIFF + RAW surfacing (explicit-unsupported surface)
+# ---------------------------------------------------------------------------
+
+
+def test_tiff_surfaced_as_supported(tmp_path):
+    """TIFF is enumerable and advertised as a decodable, supported format."""
+    folder = tmp_path / "media"
+    folder.mkdir()
+    (folder / "a.tiff").write_bytes(b"tiff-bytes")
+    (folder / "b.tif").write_bytes(b"tif-bytes")
+    connector = LocalConnector(folder)
+    assets = list(connector.enumerate())
+    assert {meta.media_type for meta in assets} == {".tiff", ".tif"}
+    # TIFF is never flagged unsupported — it is decodable (R003).
+    for meta in assets:
+        assert meta.extra.get("unsupported") is not True
+    assert ".tiff" in connector.capabilities.supported_media_types
+    assert ".tif" in connector.capabilities.supported_media_types
+
+
+def test_raw_surfaced_but_flagged_unsupported(tmp_path):
+    """RAW files are enumerated (never silently dropped) but flagged unsupported."""
+    folder = tmp_path / "media"
+    folder.mkdir()
+    (folder / "photo.cr2").write_bytes(b"cr2-raw")
+    (folder / "shot.nef").write_bytes(b"nef-raw")
+    (folder / "pic.arw").write_bytes(b"arw-raw")
+    (folder / "frame.dng").write_bytes(b"dng-raw")
+    connector = LocalConnector(folder)
+    assets = list(connector.enumerate())
+    assert len(assets) == 4
+    for meta in assets:
+        assert meta.extra.get("unsupported") is True  # explicit unsupported (R003)
+        assert meta.available is True
+        assert meta.asset_id.startswith(str(folder.resolve()))
+    # RAW is surfaced but never advertised as decodable/supported.
+    raw_types = {meta.media_type for meta in assets}
+    assert raw_types & set(connector.capabilities.supported_media_types) == set()
+
+
+def test_mixed_folder_surfaces_supported_and_raw_ignores_others(tmp_path):
+    """Enumerates supported + RAW, and still ignores unrelated/dot files."""
+    folder = tmp_path / "media"
+    folder.mkdir()
+    (folder / "a.jpg").write_bytes(b"a")
+    (folder / "b.tiff").write_bytes(b"b")
+    (folder / "c.cr2").write_bytes(b"c")
+    (folder / "d.txt").write_bytes(b"d")
+    (folder / ".hidden").write_bytes(b"h")
+    connector = LocalConnector(folder)
+    by_type = {meta.media_type: meta for meta in connector.enumerate()}
+    assert set(by_type) == {".jpg", ".tiff", ".cr2"}
+    assert by_type[".jpg"].extra.get("unsupported") is not True
+    assert by_type[".tiff"].extra.get("unsupported") is not True
+    assert by_type[".cr2"].extra.get("unsupported") is True
+
+
+def test_health_counts_raw_files(tmp_path):
+    """Health media count includes surfaced RAW files."""
+    folder = tmp_path / "media"
+    folder.mkdir()
+    (folder / "a.jpg").write_bytes(b"a")
+    (folder / "b.cr2").write_bytes(b"b")
+    connector = LocalConnector(folder)
+    assert "2 media files" in connector.health().detail
+
+
+def test_raw_and_supported_suffix_classifiers():
+    """Classifier helpers are case-insensitive and partition the two sets."""
+    from curator.connectors.local import (
+        RAW_SUFFIXES,
+        SUPPORTED_SUFFIXES,
+        is_raw_suffix,
+        is_supported_suffix,
+    )
+
+    assert ".tiff" in SUPPORTED_SUFFIXES
+    assert ".tif" in SUPPORTED_SUFFIXES
+    assert ".cr2" in RAW_SUFFIXES
+    assert ".dng" in RAW_SUFFIXES
+    # Case-insensitive.
+    assert is_raw_suffix(".NEF") is True
+    assert is_supported_suffix(".WebP") is True
+    # A supported suffix is never RAW; a RAW suffix is never supported.
+    assert is_raw_suffix(".jpg") is False
+    assert is_supported_suffix(".cr2") is False
+    assert is_supported_suffix(".tiff") is True
+
+
+def test_raw_read_original_round_trip(tmp_path):
+    """Surface a RAW file as an ordinary readable asset (bytes stream intact)."""
+    folder = tmp_path / "media"
+    folder.mkdir()
+    payload = b"raw-payload"
+    (folder / "photo.cr2").write_bytes(payload)
+    connector = LocalConnector(folder)
+    meta = next(iter(connector.enumerate()))
+    assert connector.read_original(meta.asset_id) == payload

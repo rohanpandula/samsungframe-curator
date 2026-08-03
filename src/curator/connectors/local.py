@@ -20,9 +20,42 @@ from curator.connectors.base import (
 )
 from curator.errors import ConnectorError
 
-# Media types this connector will surface. Everything else in the folder is
-# ignored by enumeration (e.g. dotfiles, directories).
-SUPPORTED_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic")
+# Media types this connector can **ingest/decode** (R003). Everything in this
+# list is surfaced by enumeration. Everything else in the folder is ignored by
+# enumeration (e.g. dotfiles, directories, unknown extensions).
+SUPPORTED_SUFFIXES = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tiff", ".tif")
+
+# Recognized RAW camera formats. These are **surfaced by enumeration** so they
+# get the explicit-unsupported/preview-only status R003 demands, but they are
+# *not* decodable by this pipeline and are tagged ``unsupported`` in the
+# metadata ``extra`` map — a RAW file never silently disappears.
+RAW_SUFFIXES = (
+    ".raw",
+    ".cr2",
+    ".nef",
+    ".arw",
+    ".dng",
+    ".orf",
+    ".raf",
+    ".rw2",
+    ".pef",
+    ".srw",
+    ".x3f",
+)
+
+
+# Key used in ``AssetMetadata.extra`` to flag a surfaced-but-unsupported file.
+UNSUPPORTED_EXTRA_KEY = "unsupported"
+
+
+def is_supported_suffix(suffix: str) -> bool:
+    """True if *suffix* (case-insensitive) is a decodable ingest-supported format."""
+    return suffix.lower() in SUPPORTED_SUFFIXES
+
+
+def is_raw_suffix(suffix: str) -> bool:
+    """True if *suffix* (case-insensitive) is a recognized RAW format."""
+    return suffix.lower() in RAW_SUFFIXES
 
 
 def _revision_token(st) -> str:
@@ -65,10 +98,13 @@ class LocalConnector(SourceConnector):
     # -- enumeration ----------------------------------------------------------
 
     def enumerate(self, cursor: str | None = None) -> Iterator[AssetMetadata]:
-        """Yield metadata for every supported media file, sorted by path.
+        """Yield metadata for every enumerated media file, sorted by path.
 
-        Only files with a supported suffix are surfaced; directories and other
-        files are ignored. Ordering is deterministic (sorted by absolute path).
+        Enumerates both decodable images (SUPPORTED_SUFFIXES, incl. TIFF) and
+        recognized RAW formats. RAW files are surfaced (never silently dropped)
+        and flagged as explicitly unsupported in ``extra`` (R003). Directories
+        and unrelated files are ignored. Ordering is deterministic (sorted by
+        absolute path).
         """
         for path in self._media_files():
             if cursor is not None and str(path) <= cursor:
@@ -79,19 +115,26 @@ class LocalConnector(SourceConnector):
         if not self.folder.is_dir():
             return
         for path in sorted(self.folder.rglob("*")):
-            if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
+            if path.is_file() and (is_supported_suffix(path.suffix) or is_raw_suffix(path.suffix)):
                 yield path
 
     def _metadata(self, path: Path) -> AssetMetadata:
         st = path.stat()
+        suffix = path.suffix.lower()
+        extra: dict = {"path": str(path)}
+        if is_raw_suffix(suffix):
+            # Explicit unsupported surface: a recognized RAW file is enumerated
+            # but tagged so the ingest pipeline marks it unsupported, never as
+            # silently missing (R003).
+            extra[UNSUPPORTED_EXTRA_KEY] = True
         return AssetMetadata(
             asset_id=self._asset_id(path),
             connector_id=self.connector_id,
             revision=_revision_token(st),
-            media_type=path.suffix.lower(),
+            media_type=suffix,
             size_bytes=st.st_size,
             available=path.is_file(),
-            extra={"path": str(path)},
+            extra=extra,
         )
 
     def _asset_id(self, path: Path) -> str:
