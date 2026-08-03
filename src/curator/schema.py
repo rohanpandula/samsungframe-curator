@@ -26,6 +26,13 @@ v2 (migration ``(2, ...)``) extends the boundary for S02's ingest + dedup work:
 - ``content_image`` — a durable per-content-hash image signature table holding decoded
   dimensions and a perceptual hash (phash) string for near-dupe clustering.
 
+v3 (migration ``(3, ...)``) expands ``consolidation_journal`` from a run-level table into a
+per-file state machine (``started -> staged -> verified -> promoted/error``) mirroring
+``ingest_journal`` — added columns: ``connector_id``, ``asset_id``, ``sha256``, ``error``,
+``started_at``, ``finished_at`` — so a mid-copy interrupt can be resumed (S03 resume
+contract). Existing v1 run-level columns (``status``/``note``/``created_at``) are kept for
+backward compatibility.
+
 Keep v1 minimal: analysis / approval / render tables are added by later slices (S02/S03),
 not here.
 """
@@ -137,10 +144,34 @@ CREATE TABLE IF NOT EXISTS content_image (
 );
 """
 
+# Migration v3 (S03 consolidation): expands ``consolidation_journal`` from a
+# run-level table (id, status, note, created_at) into a **per-file state machine**
+# mirroring ``ingest_journal`` — ``started -> staged -> verified -> promoted/error`` —
+# so a mid-copy interrupt can be resumed and every file's outcome is observable.
+# SQLite forbids adding multiple columns in a single ALTER, so each ADD COLUMN is
+# its own statement (v2 precedent); ``executescript`` applies them in one step.
+# Existing columns (status/note/created_at) are preserved for backward compat with
+# any v1/v2 run-level rows.
+SCHEMA_V3_SQL = """
+ALTER TABLE consolidation_journal ADD COLUMN connector_id TEXT;
+ALTER TABLE consolidation_journal ADD COLUMN asset_id TEXT;
+ALTER TABLE consolidation_journal ADD COLUMN sha256 TEXT;
+ALTER TABLE consolidation_journal ADD COLUMN error TEXT;
+ALTER TABLE consolidation_journal ADD COLUMN started_at TEXT;
+ALTER TABLE consolidation_journal ADD COLUMN finished_at TEXT;
+
+-- Resume lookups select the latest row per (connector_id, asset_id) / status.
+CREATE INDEX IF NOT EXISTS idx_consolidation_journal_conn_asset
+    ON consolidation_journal(connector_id, asset_id);
+CREATE INDEX IF NOT EXISTS idx_consolidation_journal_status
+    ON consolidation_journal(status);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
     (2, SCHEMA_V2_SQL),
+    (3, SCHEMA_V3_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).

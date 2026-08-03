@@ -174,3 +174,70 @@ def test_upgrade_from_v1_to_v2(data_root):
         assert "content_image" in db.table_names(conn)
     finally:
         conn.close()
+
+
+def test_migration_v3_expands_consolidation_journal(dbase):
+    """v3 adds the per-file state-machine columns to consolidation_journal."""
+    cols = {r[1] for r in dbase.execute("PRAGMA table_info(consolidation_journal)")}
+    for name in (
+        "connector_id",
+        "asset_id",
+        "sha256",
+        "error",
+        "started_at",
+        "finished_at",
+    ):
+        assert name in cols, f"missing v3 column {name}"
+    # v1 run-level columns are preserved for backward compatibility.
+    for name in ("id", "status", "note", "created_at"):
+        assert name in cols, f"v1 column lost {name}"
+
+
+def test_migration_v3_creates_resume_indexes(dbase):
+    """v3 ships the (connector_id, asset_id) + status resume indexes."""
+    indexes = {
+        r[0]
+        for r in dbase.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='index' AND tbl_name='consolidation_journal'"
+        )
+    }
+    assert "idx_consolidation_journal_conn_asset" in indexes
+    assert "idx_consolidation_journal_status" in indexes
+
+
+def test_migrate_is_idempotent_v3(dbase):
+    """Re-running migrate after v3 re-applies nothing (pure idempotence)."""
+    cols_before = {
+        r[1] for r in dbase.execute("PRAGMA table_info(consolidation_journal)")
+    }
+    db.migrate(dbase)
+    cols_after = {
+        r[1] for r in dbase.execute("PRAGMA table_info(consolidation_journal)")
+    }
+    assert cols_before == cols_after
+    assert dbase.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+
+
+def test_upgrade_from_v2_to_v3(data_root):
+    """A v2-only DB upgrades in place to v3 via the linear migration runner."""
+    conn = db.connect()
+    try:
+        # Force a v2-only database: apply migrations 1+2 and pin user_version to 2.
+        conn.executescript(schema.MIGRATIONS[0][1])
+        conn.executescript(schema.MIGRATIONS[1][1])
+        conn.execute("PRAGMA user_version = 2")
+        conn.commit()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(consolidation_journal)")}
+        assert "asset_id" not in cols  # v2 does not have the per-file columns
+
+        db.migrate(conn)
+
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(consolidation_journal)")}
+        assert "asset_id" in cols
+        assert "finished_at" in cols
+    finally:
+        conn.close()

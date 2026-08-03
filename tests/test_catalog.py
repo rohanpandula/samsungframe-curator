@@ -270,3 +270,113 @@ def test_get_by_phash(catalog):
 
 def test_get_by_phash_no_match_is_empty(catalog):
     assert catalog.get_by_phash("no-such-phash") == []
+
+
+# -- consolidation_journal (schema v3) ----------------------------------------
+
+
+def test_consolidation_journal_start_writes_started_row(catalog):
+    """consolidation_journal_start records a non-terminal ``started`` row."""
+    row_id = catalog.consolidation_journal_start("legacy-ssd", "IMG_001.jpg")
+    assert isinstance(row_id, int)
+    row = catalog.db.execute(
+        "SELECT connector_id, asset_id, status, sha256, error, finished_at"
+        " FROM consolidation_journal WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    assert row is not None
+    assert (row[0], row[1], row[2]) == ("legacy-ssd", "IMG_001.jpg", "started")
+    # Non-terminal: no sha yet, no error, no finished_at stamp.
+    assert row[3] is None
+    assert row[4] is None
+    assert row[5] is None
+
+
+def test_consolidation_journal_lifecycle_to_promoted(catalog):
+    """Started -> staged -> verified -> promoted stamps finished_at only on terminal."""
+    row_id = catalog.consolidation_journal_start("legacy-ssd", "IMG_001.jpg")
+    sha = "a" * 64
+
+    catalog.consolidation_journal_update(row_id, "staged", sha256=sha)
+    row = catalog.db.execute(
+        "SELECT status, sha256, finished_at FROM consolidation_journal WHERE id = ?",
+        (row_id,),
+    ).fetchone()
+    assert row[0] == "staged"
+    assert row[1] == sha
+    # staged is terminal success in our vocabulary -> finished_at IS stamped.
+    assert row[2] is not None
+
+    catalog.consolidation_journal_update(row_id, "verified")
+    catalog.consolidation_journal_update(row_id, "promoted")
+    row = catalog.db.execute(
+        "SELECT status, error FROM consolidation_journal WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "promoted"
+    assert row[1] is None
+
+
+def test_consolidation_journal_error_records_message(catalog):
+    """An ``error`` transition persists the failure detail and stays active."""
+    row_id = catalog.consolidation_journal_start("legacy-ssd", "IMG_002.jpg")
+    catalog.consolidation_journal_update(
+        row_id, "error", error="staged sha mismatch"
+    )
+    row = catalog.db.execute(
+        "SELECT status, error FROM consolidation_journal WHERE id = ?", (row_id,)
+    ).fetchone()
+    assert row[0] == "error"
+    assert row[1] == "staged sha mismatch"
+
+
+def test_consolidation_journal_update_unknown_status_raises(catalog):
+    """An unknown status is rejected, matching the fixed vocabulary."""
+    row_id = catalog.consolidation_journal_start("legacy-ssd", "IMG_003.jpg")
+    with pytest.raises(CatalogError):
+        catalog.consolidation_journal_update(row_id, "definitely-not-a-status")
+
+
+def test_consolidation_checkpoint_returns_latest_status(catalog):
+    """consolidation_checkpoint returns the newest row's status per file."""
+    conn_id, asset = "legacy-ssd", "IMG_004.jpg"
+    assert catalog.consolidation_checkpoint(conn_id, asset) is None  # no row yet
+
+    catalog.consolidation_journal_update(
+        catalog.consolidation_journal_start(conn_id, asset), "verified"
+    )
+    assert catalog.consolidation_checkpoint(conn_id, asset) == "verified"
+
+    # A later started row supersedes the earlier verified row.
+    catalog.consolidation_journal_start(conn_id, asset)
+    assert catalog.consolidation_checkpoint(conn_id, asset) == "started"
+
+
+def test_consolidation_checkpoint_scoped_per_connector(catalog):
+    """Checkpoints are scoped by connector_id, not just asset_id."""
+    catalog.consolidation_journal_update(
+        catalog.consolidation_journal_start("run-a", "same.jpg"), "promoted"
+    )
+    catalog.consolidation_journal_start("run-b", "same.jpg")
+    assert catalog.consolidation_checkpoint("run-a", "same.jpg") == "promoted"
+    assert catalog.consolidation_checkpoint("run-b", "same.jpg") == "started"
+
+
+def test_consolidation_journal_rows_reconciles_run(catalog):
+    """consolidation_journal_rows exposes every per-file outcome for a run."""
+    conn_id = "legacy-ssd"
+    catalog.consolidation_journal_update(
+        catalog.consolidation_journal_start(conn_id, "a.jpg"), "promoted", sha256="b" * 64
+    )
+    catalog.consolidation_journal_update(
+        catalog.consolidation_journal_start(conn_id, "b.jpg"), "error", error="boom"
+    )
+
+    rows = catalog.consolidation_journal_rows(conn_id)
+    assert len(rows) == 2
+    by_asset = {r["asset_id"]: r for r in rows}
+    assert by_asset["a.jpg"]["status"] == "promoted"
+    assert by_asset["a.jpg"]["sha256"] == "b" * 64
+    assert by_asset["b.jpg"]["status"] == "error"
+    assert by_asset["b.jpg"]["error"] == "boom"
+    # Unrelated runs are excluded.
+    assert catalog.consolidation_journal_rows("other-run") == []

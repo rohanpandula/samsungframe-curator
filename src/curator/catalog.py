@@ -52,6 +52,48 @@ _ENTRY_COLUMNS = [
 # Column order of ``SELECT *`` on content_image (schema v2 DDL).
 _IMAGE_COLUMNS = ["sha256", "width", "height", "phash", "created_at"]
 
+# Column order of ``SELECT *`` on consolidation_journal (schema v1 + v3 DDL).
+# v3 added the per-file columns after the run-level ones.
+_CONSOLIDATION_COLUMNS = [
+    "id",
+    "status",
+    "note",
+    "created_at",
+    # v3 per-file state-machine columns (migration 3).
+    "connector_id",
+    "asset_id",
+    "sha256",
+    "error",
+    "started_at",
+    "finished_at",
+]
+
+# Per-file consolidation_journal status vocabulary (mirrors ingest_journal).
+CONSOLIDATION_STARTED = "started"
+CONSOLIDATION_STAGED = "staged"
+CONSOLIDATION_VERIFIED = "verified"
+CONSOLIDATION_PROMOTED = "promoted"
+CONSOLIDATION_ERROR = "error"
+
+# The full per-file status vocabulary (for input validation).
+CONSOLIDATION_STATUSES = frozenset(
+    {
+        CONSOLIDATION_STARTED,
+        CONSOLIDATION_STAGED,
+        CONSOLIDATION_VERIFIED,
+        CONSOLIDATION_PROMOTED,
+        CONSOLIDATION_ERROR,
+    }
+)
+
+# Terminal success statuses: a file recorded here is NOT re-attempted on resume,
+# while an ``error`` row IS re-attempted (mirror IngestPipeline resume semantics).
+_CONSOLIDATION_TERMINAL = {
+    CONSOLIDATION_STAGED,
+    CONSOLIDATION_VERIFIED,
+    CONSOLIDATION_PROMOTED,
+}
+
 _TIMESTAMP = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')"
 
 
@@ -302,6 +344,113 @@ class Catalog:
             " WHERE i.phash = ? ORDER BY e.id",
             (phash,),
         )
+
+    # -- consolidation journal (schema v3) -------------------------------------
+
+    def consolidation_journal_start(
+        self, connector_id: str, asset_id: str, note: str | None = None
+    ) -> int:
+        """Record a ``started`` row in the per-file consolidation_journal.
+
+        ``connector_id`` identifies the consolidation run (typically the resolved
+        legacy source path under the canonical data root) and ``asset_id`` the
+        individual source file within it. Returns the new row id. Non-terminal — the
+        row is always superseded by a ``staged``/``verified``/``promoted``/``error``
+        transition via :meth:`consolidation_journal_update`.
+        """
+        try:
+            cur = self.db.execute(
+                "INSERT INTO consolidation_journal"
+                " (connector_id, asset_id, status, note)"
+                " VALUES (?, ?, ?, ?)",
+                (connector_id, asset_id, CONSOLIDATION_STARTED, note),
+            )
+            self.db.commit()
+        except sqlite3.Error as exc:
+            self.db.rollback()
+            raise CatalogError(
+                f"failed to start consolidation_journal row for"
+                f" {connector_id}/{asset_id}: {exc}"
+            ) from exc
+        row_id = cur.lastrowid
+        if row_id is None:
+            raise CatalogError("failed to obtain consolidation_journal row id")
+        return int(row_id)
+
+    def consolidation_journal_update(
+        self,
+        row_id: int,
+        status: str,
+        sha256: str | None = None,
+        error: str | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Transition one consolidation_journal row to *status*.
+
+        Writes ``sha256``/``error``/``note`` only when provided (COALESCE keeps prior
+        values) and stamps ``finished_at`` on terminal success statuses
+        (``staged``/``verified``/``promoted``). Raise :class:`CatalogError` for an
+        unknown status. ``error`` rows stay active (re-attempted on resume).
+        """
+        if status not in CONSOLIDATION_STATUSES:
+            raise CatalogError(f"unknown consolidation_journal status {status!r}")
+        if status in _CONSOLIDATION_TERMINAL:
+            sql = (
+                "UPDATE consolidation_journal SET"
+                "   sha256 = COALESCE(?, sha256),"
+                "   status = ?,"
+                "   error = COALESCE(?, error),"
+                "   note = COALESCE(?, note),"
+                f"   finished_at = {_TIMESTAMP}"
+                " WHERE id = ?"
+            )
+        else:
+            sql = (
+                "UPDATE consolidation_journal SET"
+                "   sha256 = COALESCE(?, sha256),"
+                "   status = ?,"
+                "   error = COALESCE(?, error),"
+                "   note = COALESCE(?, note)"
+                " WHERE id = ?"
+            )
+        try:
+            self.db.execute(sql, (sha256, status, error, note, row_id))
+            self.db.commit()
+        except sqlite3.Error as exc:
+            self.db.rollback()
+            raise CatalogError(
+                f"failed to update consolidation_journal row {row_id}: {exc}"
+            ) from exc
+
+    def consolidation_checkpoint(
+        self, connector_id: str, asset_id: str
+    ) -> str | None:
+        """Return the status of the newest journal row for one source file.
+
+        Used by resume to decide whether a file was already promoted/verified
+        (skip) or errored (re-attempt). Returns ``None`` when no row exists.
+        """
+        row = self.db.execute(
+            "SELECT status FROM consolidation_journal"
+            " WHERE connector_id = ? AND asset_id = ?"
+            " ORDER BY id DESC LIMIT 1",
+            (connector_id, asset_id),
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    def consolidation_journal_rows(
+        self, connector_id: str
+    ) -> list[dict[str, Any]]:
+        """Return every journal row for a consolidation run, oldest first.
+
+        Lets the executor reconcile the per-file outcomes of a run (S05: no unique
+        source omitted, no source deleted).
+        """
+        cur = self.db.execute(
+            "SELECT * FROM consolidation_journal WHERE connector_id = ? ORDER BY id",
+            (connector_id,),
+        )
+        return [dict(zip(_CONSOLIDATION_COLUMNS, row)) for row in cur.fetchall()]
 
     # -- impl -------------------------------------------------------------------
 
