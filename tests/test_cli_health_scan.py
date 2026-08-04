@@ -55,3 +55,96 @@ def test_health_auto_migrates_and_human_summary(data_root, capsys):
     out = capsys.readouterr().out
     assert "healthy" in out
     assert "0 catalog entries" in out
+
+
+# ---------------------------------------------------------------------------
+# T3: `curator scan PATH [--json]` + ScanDiff (exit 0 changes / 3 no-change)
+# ---------------------------------------------------------------------------
+
+
+def _valid_png_bytes() -> bytes:
+    """Return a small, valid, decodable PNG payload (fresh every call)."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (16, 16), (140, 70, 35)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_scan_no_change_exit_3(data_root, tmp_path, capsys):
+    """Scanning an unchanged folder after a completed ingest reports no diff (exit 3).
+
+    Uses the full 50-file fixture: RAW and corrupt files (never cataloged by ingest)
+    must not surface as "new" drift, so an unchanged re-scan is ``no_changes``.
+    """
+    folder = build_fixture(tmp_path / "fixture").root
+    assert cli.main(["ingest", str(folder)]) == 0
+    capsys.readouterr()  # drain ingest report
+
+    rc = cli.main(["scan", "--json", str(folder)])
+    assert rc == 3
+
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["no_changes"] is True
+    assert doc["new"] == []
+    assert doc["changed"] == []
+    assert doc["missing"] == []
+
+
+def test_scan_reports_new_changed_missing(data_root, tmp_path, capsys):
+    """Scan classifies add/edit/delete drift as new / changed / missing and exits 0."""
+    fixture = build_fixture(tmp_path / "fixture")
+    folder = fixture.root
+    assert cli.main(["ingest", str(folder)]) == 0
+    capsys.readouterr()  # drain ingest report
+
+    # A brand-new, decodable image -> new.
+    new_file = folder / "brand_new.png"
+    new_file.write_bytes(_valid_png_bytes())
+    # Overwrite a cataloged file with different (still-valid) bytes -> changed.
+    changed_target = folder / fixture.singleton_files[0]
+    changed_target.write_bytes(_valid_png_bytes())
+    # Delete a cataloged file -> missing.
+    missing_target = folder / fixture.singleton_files[1]
+    missing_target.unlink()
+
+    rc = cli.main(["scan", "--json", str(folder)])
+    assert rc == 0
+
+    doc = json.loads(capsys.readouterr().out)
+    new_ids = {e["asset_id"] for e in doc["new"]}
+    changed_ids = {e["asset_id"] for e in doc["changed"]}
+    assert str(new_file.resolve()) in new_ids
+    assert str(changed_target.resolve()) in changed_ids
+    assert str(missing_target.resolve()) in doc["missing"]
+
+
+def test_scan_json_parseable(data_root, tmp_path, capsys):
+    """``scan --json`` emits a parseable diff with the documented keys."""
+    fixture = build_fixture(tmp_path / "fixture")
+    folder = fixture.root
+    assert cli.main(["ingest", str(folder)]) == 0
+    capsys.readouterr()  # drain ingest report
+    # Introduce exactly one drift so the diff is non-trivial.
+    missing_target = folder / fixture.singleton_files[0]
+    missing_target.unlink()
+
+    rc = cli.main(["scan", "--json", str(folder)])
+    assert rc == 0
+
+    doc = json.loads(capsys.readouterr().out)
+    assert set(doc) == {"connector_id", "new", "changed", "missing", "no_changes"}
+    assert isinstance(doc["new"], list)
+    assert isinstance(doc["changed"], list)
+    assert isinstance(doc["missing"], list)
+    assert doc["missing"] == [str(missing_target.resolve())]
+
+
+def test_scan_rejects_non_directory(data_root, tmp_path, capsys):
+    """Scanning a non-directory source is a fatal CuratorError, like ingest."""
+    rc = cli.main(["scan", str(tmp_path / "no-such-folder")])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "not a directory" in err

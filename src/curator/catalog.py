@@ -206,6 +206,20 @@ class Catalog:
             ) from exc
         return digest
 
+    def get_source_asset_ids(self, connector_id: str) -> set[str]:
+        """Return the set of distinct on-disk ``asset_id`` values cataloged for *connector_id*.
+
+        Used by ``scan`` to compute the ``missing`` side of the catalog diff: any
+        cataloged asset id the source no longer enumerates is missing. Queries
+        ``catalog_entries`` (the actual catalog) rather than ``source_assets``,
+        so only assets that were successfully indexed count as cataloged.
+        """
+        cur = self.db.execute(
+            "SELECT DISTINCT asset_id FROM catalog_entries WHERE connector_id = ?",
+            (connector_id,),
+        )
+        return {str(row[0]) for row in cur.fetchall()}
+
     def get_by_source(self, connector_id: str, asset_id: str) -> dict[str, Any] | None:
         """Return the most recent catalog entry for ``(connector_id, asset_id)``.
 

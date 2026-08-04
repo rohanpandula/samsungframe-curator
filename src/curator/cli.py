@@ -33,6 +33,15 @@ from curator.consolidate import ConsolidationExecutor, ConsolidationPlan, build_
 from curator.errors import CuratorError
 from curator.ingest.pipeline import IngestPipeline
 from curator.ingest.report import IngestReport
+from curator.scan import ScanDiff, scan_connector
+
+# Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
+# 3=no-change. Every subcommand returns one of these; ``main`` maps uncaught
+# CuratorError/OSError to ``EXIT_FATAL`` (2).
+EXIT_OK = 0
+EXIT_PARTIAL = 1
+EXIT_FATAL = 2
+EXIT_NO_CHANGE = 3
 
 # Connector instance used for ad-hoc ``catalog add`` invocations. The source identity
 # is the normalized absolute file path, consistent with LocalConnector semantics.
@@ -102,6 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit structured JSON instead of a human-readable summary",
+    )
+
+    scan = sub.add_parser(
+        "scan", help="diff a local folder against the catalog (exit 0 changes / 3 none)"
+    )
+    scan.add_argument("path", help="path to the local folder to scan")
+    scan.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the catalog diff as structured JSON",
     )
 
     return parser
@@ -268,6 +287,56 @@ def _health(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scan(args: argparse.Namespace) -> int:
+    """Diff *args.path* against the catalog; return 0 if drift, 3 if none.
+
+    Opens a :class:`Catalog` (auto-migrating, honoring ``CURATOR_DATA_ROOT``),
+    builds a :class:`LocalConnector` over *args.path*, and computes a read-only
+    :class:`ScanDiff` (never writes to catalog/journal tables). Prints the diff
+    as JSON (``--json``) or a human summary. Returns :data:`EXIT_NO_CHANGE` (3)
+    when ``no_changes`` is true, else :data:`EXIT_OK` (0).
+    """
+    folder = Path(args.path).resolve()
+    if not folder.is_dir():
+        raise CuratorError(f"scan source is not a directory: {args.path!r}")
+    catalog = Catalog()
+    try:
+        diff = scan_connector(LocalConnector(folder), catalog)
+    finally:
+        catalog.db.close()
+    if args.json:
+        print(diff.to_json())
+    else:
+        print(_format_scan(diff))
+    return EXIT_NO_CHANGE if diff.no_changes else EXIT_OK
+
+
+def _format_scan(diff: ScanDiff) -> str:
+    """Render a :class:`ScanDiff` as a human-readable drift summary."""
+    lines = [
+        f"scan {diff.connector_id}",
+        f"  new     : {len(diff.new)}",
+        f"  changed : {len(diff.changed)}",
+        f"  missing : {len(diff.missing)}",
+    ]
+    if diff.new:
+        lines.append("")
+        lines.append("new:")
+        lines.extend(f"  {Path(e['asset_id']).name}" for e in diff.new)
+    if diff.changed:
+        lines.append("")
+        lines.append("changed:")
+        lines.extend(f"  {Path(e['asset_id']).name}" for e in diff.changed)
+    if diff.missing:
+        lines.append("")
+        lines.append("missing:")
+        lines.extend(f"  {Path(asset_id).name}" for asset_id in diff.missing)
+    if diff.no_changes:
+        lines.append("")
+        lines.append("no changes")
+    return "\n".join(lines)
+
+
 def _format_plan(plan: ConsolidationPlan) -> str:
     """Render a :class:`ConsolidationPlan` as a human-readable dry-run report."""
     counts = plan.group_counts()
@@ -353,8 +422,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _consolidate(args)
     if args.command == "health":
         return _health(args)
+    if args.command == "scan":
+        return _scan(args)
     # Unreachable given required subparsers; defensive fallback.
-    return 2
+    return EXIT_FATAL
 
 
 def main(argv: list[str] | None = None) -> int:
