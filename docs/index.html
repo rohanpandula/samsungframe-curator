@@ -146,6 +146,13 @@
   .pcard .k { font-family: var(--font-mono); font-size: 12px; color: var(--accent); display: block; margin-bottom: 8px; }
   .pcard .v { font-size: 14px; color: var(--text); }
 
+  .split { margin-top: clamp(28px, 4vw, 48px); }
+  .split + .split { margin-top: clamp(44px, 6vw, 76px); }
+  .split-head { max-width: 640px; margin-bottom: 24px; }
+  .split-head h3 { margin: 0 0 8px; font-size: 22px; letter-spacing: -.01em; }
+  .split-head p { margin: 0; color: var(--text-dim); font-size: 15px; }
+  .split .bento em { font-style: italic; color: var(--text); }
+
   /* ---------- footer ---------- */
   footer { border-top: 1px solid var(--line); padding: 40px 0 48px; color: var(--text-faint); font-size: 13.5px; }
   .foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
@@ -302,22 +309,68 @@
 <section class="block" id="taste" style="background:var(--bg-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);">
   <div class="wrap">
     <h2 class="sec reveal">Taste Lens.</h2>
-    <p class="sub reveal">After the baseline is trustworthy, add personalization without eroding it.</p>
-    <div class="bento">
-      <div class="tile wide reveal">
-        <span class="badge">Isolation first</span>
-        <h3>Ranking that is reversible and explainable</h3>
-        <p>Versioned profiles rerank candidates as a deterministic “baseline + personal delta,” each contribution explained. Disable Taste Lens and ranking returns exactly to baseline. Approved output always renders identically.</p>
+    <p class="sub reveal">Built only after the baseline is trustworthy. Taste Lens learns how a person or household weights the visual qualities the analysis engine already extracts — it never replaces discovery, analysis, rendering, or your approval.</p>
+
+    <div class="split">
+      <div class="split-head">
+        <h3>Ranking you can reverse in one click</h3>
+        <p>The core promise is isolation: personalization is a layer on top of a baseline you can always get back.</p>
       </div>
-      <div class="tile reveal">
-        <span class="badge">Learn</span>
-        <h3>Pairwise active learning</h3>
-        <p>Informative pairs are chosen for sample efficiency; every lift against baseline is measured and gated before it is promoted.</p>
+      <div class="bento">
+        <div class="tile reveal">
+          <span class="badge">Profiles</span>
+          <h3>Versioned and context-aware</h3>
+          <p>Separate, versioned profiles for personal, household, room, season, guest-safe, and experimental contexts — each isolated so tuning one never touches another.</p>
+        </div>
+        <div class="tile high reveal">
+          <span class="badge">Explainable reranking</span>
+          <h3>Baseline + a personal delta</h3>
+          <p>Every candidate is ranked as baseline score plus a weighted personal delta across named signals — aesthetic, technical, color, and pairing. Each contribution is listed, so you always know why something moved.</p>
+        </div>
+        <div class="tile reveal">
+          <span class="badge">Train by comparing</span>
+          <h3>Active-learning pairwise tuning</h3>
+          <p>“I prefer this one” updates the profile deterministically. Informative pairs are chosen first for sample efficiency, and every proposed improvement is measured against a held-out set before it is promoted.</p>
+        </div>
+        <div class="tile reveal">
+          <span class="badge">Controls</span>
+          <h3>Blend, veto, and full history</h3>
+          <p>Blend profiles deterministically, veto what you dislike, and replay, undo, export, reset, or delete any profile version. Everything is reversible.</p>
+        </div>
+        <div class="tile reveal">
+          <span class="badge">The isolation guarantee</span>
+          <h3>Turn it off, get the baseline back</h3>
+          <p>Disable Taste Lens and ranking returns to the exact baseline order. Approved output always renders byte-identically whether Taste Lens is on or off.</p>
+        </div>
       </div>
-      <div class="tile reveal">
-        <span class="badge">Discover</span>
-        <h3>An adaptive Taste Deck</h3>
-        <p>A federated creator catalog with artist spotlights, a likely / adjacent / wildcard feed, and a Familiar ↔ Surprising dial. Calibrated and isolated.</p>
+    </div>
+
+    <div class="split">
+      <div class="split-head">
+        <h3>Taste Lens Discovery</h3>
+        <p>A calm place to find new things, fed by a federated catalog of painters and photographers.</p>
+      </div>
+      <div class="bento">
+        <div class="tile reveal">
+          <span class="badge">Catalog</span>
+          <h3>Federated and outage-isolated</h3>
+          <p>A normalized creator catalog where a down or unreachable source is skipped without breaking the deck — discovery is never held hostage by one feed.</p>
+        </div>
+        <div class="tile high reveal">
+          <span class="badge">Taste Deck</span>
+          <h3>An adaptive feed you can dial</h3>
+          <p>Compose a deterministic feed in <em>likely</em>, <em>adjacent</em>, or <em>wildcard</em> modes, surface Artist Spotlights, and turn a Familiar ↔ Surprising dial to lean toward what you already love or toward something new.</p>
+        </div>
+        <div class="tile reveal">
+          <span class="badge">Calibrate</span>
+          <h3>Pairs refine the profile</h3>
+          <p>Compare two works on the deck and the result folds into your profile deterministically — the same tuning engine used everywhere else.</p>
+        </div>
+        <div class="tile reveal">
+          <span class="badge">Safety</span>
+          <h3>Denied, isolated, and accessible</h3>
+          <p>A creator whose publication is denied is never surfaced or acted on. Each work’s signals are isolated — nothing cross-contaminates — and every action is identical whether you use a gesture, a button, or the keyboard.</p>
+        </div>
       </div>
     </div>
   </div>
