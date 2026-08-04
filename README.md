@@ -1,154 +1,105 @@
-# Curator — Samsung Frame Curation Pipeline
+# Curator — Samsung Frame Curation
 
-Curator is a local-first studio for Samsung Frame TVs and digital displays. It
-ingests photographs from local folders and mounted NAS paths, consolidates them
-non-destructively, analyzes them for quality offline, proposes display
-treatments, renders exact Frame-ready files, and publishes approved art through
-pluggable destination adapters. It runs air-gapped by default: no mandatory
-network calls during ingest, analysis, proposal, render, or a local publish.
-
-The project is organized around **six orthogonal configuration axes** (R022):
-source, intelligence provider, interface, runtime, render target, and
-destination. Every valid combination travels through the same catalog, analysis
-schema, manifest, renderer, validator, approval model, and job journal. There
-are no bespoke code paths for specific axis combinations.
-
-## Current status
-
-Complete end to end: **634 automated tests**, an 8-file deterministic
-`make acceptance` gate, and **27 of 27 active requirements validated**.
+Curator is a free, local-first app for Samsung Frame TVs. It takes your photo
+library, cleans it up, picks the best shots, and gets them ready to display on
+your Frame. It works fully offline: nothing is sent over the network unless you
+turn that on yourself.
 
 ## Features
 
-- **Content-addressed catalog.** SQLite + SHA-256 artifact store with
-  connector-scoped source identity; renames, moves, and remote revisions never
-  collide.
-- **Non-destructive consolidation.** Dry-run plan → staged copy → hash verify →
-  atomic promote, resumable after interruption. Sources stay untouched until you
-  approve archival.
-- **Local ingest.** HEIC, JPEG, PNG, WebP, TIFF from folders and NAS, with exact
-  and perceptual duplicate detection plus best-original recovery. RAW and
-  corrupt files report an explicit status instead of disappearing.
-- **Offline analysis.** A deterministic CPU engine scores technical and
-  aesthetic quality, saliency and subjects, crop safety, color story, and
-  pairing affinity. No cloud required.
-- **Art direction.** A policy engine proposes treatments — full-bleed,
-  contain-and-matte, panoramic, square, diptych — each with rationale, captured
-  in a versioned ArtDirectionManifest.
-- **Deterministic rendering.** Byte-identical 1080p / 4K / custom sRGB from one
-  manifest. A validator gates publishability; upscaling is never silent.
-- **Approval & history.** Per-image approve, reject, undo, redo, and batch, with
-  append-only history and rationale.
-- **Darkroom Bench web UI.** A dependency-light, accessible browser app for the
-  whole loop: browse, analyze, propose, render, validate, review. Keyboard- and
-  screen-reader-first.
-- **Safe publishing.** Filesystem and simulator destinations, Samsung Art Mode
-  (canary upload, exact-ID replace, rollback), and Home Assistant coordination
-  behind an exclusive write lease.
-- **Watcher & rotation.** A durable watcher ingests stabilized photos exactly
-  once. Collections and playlists rotate deterministically — intervals,
-  favorites, seasons, show-now.
-- **Immich connector.** Checkpointed, idempotent sync with availability
-  tombstones and a disabled-by-default feedback sink that never deletes.
-- **Cloud/hybrid opt-in.** Privacy-first routing with plain-language disclosure
-  and per-source/per-image exclusions. A provider outage pauses only
-  cloud-dependent work.
-- **Crash-safe jobs.** A durable orchestrator resumes from checkpoints without
-  duplicating art; every failure is classified with a recovery action.
-- **Production ready.** Packaging for macOS launchd and Docker (CPU + optional
-  CUDA), a prompt-free headless start, and a migration tool that imports a
-  legacy Samsung SSD read-only with backups before every mutation.
-- **Taste Lens.** Versioned, isolated profiles that rerank candidates as an
-  explainable baseline-plus-delta, tuned by pairwise comparisons — reversible in
-  one click, and it never changes approved output.
-- **Taste Lens Discovery.** A federated, outage-isolated creator catalog feeding
-  a Taste Deck with artist spotlights, likely/adjacent/wildcard modes, and a
-  Familiar↔Surprising dial.
+- **One safe home for your photos.** Everything is stored in a single catalog
+  that knows each photo by its exact content. Copies and duplicates don't make
+  extra work.
+- **Clean up your SSD safely.** It finds duplicates and near-duplicates, groups
+  similar shots, and helps you consolidate a messy folder. Your original files
+  are never changed or deleted unless you ask.
+- **Reads your formats.** Imports HEIC, JPEG, PNG, WebP, and TIFF from folders
+  and NAS drives. Files it can't read (RAW, corrupt) show a clear message
+  instead of silently vanishing.
+- **Ranks your photos for you.** An offline engine scores each shot on things
+  like sharpness, quality, composition, color, and what stands out in it. No
+  cloud needed.
+- **Suggests how to show them.** It proposes a layout for each photo, such as
+  full-bleed, matted, panoramic, square, or a two-photo diptych, and explains
+  why.
+- **Renders Frame-ready files.** One choice produces an exact 1080p or 4K
+  image. Nothing is ever upscaled or cropped without you knowing.
+- **Approve before it's used.** Approve, reject, undo, and batch-review photos.
+  Full history is kept, so you can always see what you decided and why.
+- **A simple web app.** Use the whole thing in your browser: browse, analyze,
+  preview, and approve. Works with a keyboard and screen readers.
+- **Publishes to your Frame.** Filesystem, a simulator, Samsung Art Mode, and
+  Home Assistant are all supported. Updates are safe: it tests before sending,
+  replaces by exact ID, and can roll back if something goes wrong.
+- **Watches for new photos.** New files in your watched folders are picked up
+  once, automatically.
+- **Playlists and rotation.** Collections rotate through your approved shots —
+  with intervals, favorites, seasons, and a "show now" option.
+- **Immich support.** Sync from Immich safely, with no deletions ever. An
+  optional feedback feature is off by default.
+- **Optional cloud use.** If you opt in, it tells you plainly what leaves your
+  machine and lets you exclude specific photos or folders. If the cloud is down,
+  only cloud work pauses; your local work keeps going.
+- **Survives crashes.** Long jobs resume where they stopped instead of starting
+  over, and failures are explained with a next step.
+- **Easy to install and run.** Ships with macOS launchd and Docker packaging,
+  starts without prompts, and can import an old Samsung SSD folder safely (with
+  backups first).
+- **Taste Lens.** Learns your taste and gently reorders suggestions to match —
+  explainable, tunable by comparing two photos, and reversible with one click.
+  Approved output never changes.
+- **Taste Lens Discovery.** A calm place to find new art: a feed from painters
+  and photographers with artist spotlights and a Familiar ↔ Surprising dial.
 
 ## Getting started
 
 ```bash
-make install    # uv sync
-make test       # uv run pytest -q
-make lint       # uv run ruff check .
-make type       # uv run mypy src
-make acceptance # deterministic air-gapped acceptance gate (8 files)
-make all        # install + lint + type + test
+make install    # install
+make test       # run tests
+make lint       # lint
+make type       # type check
+make acceptance # run the acceptance checks
 ```
 
 Requires Python 3.11+ and `uv`.
 
 ## CLI
 
-`curator` exposes a headless interface with stable exit codes
-(0 = ok, 1 = partial/warnings, 2 = fatal, 3 = no change) and `--json` output:
+The command line tool returns a clear exit code (0 = ok, 2 = error, 3 = nothing
+changed) and can print JSON:
 
 ```bash
-curator catalog init|add FILE      # create catalog / add a local file
-curator ingest PATH [--resume]     # ingest a folder (dedup + cluster)
-curator consolidate PATH [--dry-run|--execute] [--resume] [--archive] [--json]
-curator scan PATH [--json]         # diff a folder vs catalog (exit 0/3)
-curator health [--json]            # catalog status (exit 0)
-curator analyze PATH [--profile] [--json]
-curator propose ASSET [--target] [--json]
-curator manifest ASSET [--target] [--json]
-curator render SOURCE [--target 1080p|4k|WxH] [--json]
-curator validate FILE --expected-sha X --target WxH [--json]
-curator review [--status] [--json]          # list approvals
-curator review approve|reject|undo ASSET    # change state
-curator headless start [--config FILE] [--check]   # headless server (launchd/Docker entrypoint)
+curator catalog init                 # create the catalog
+curator catalog add FILE             # add a file
+curator ingest PATH                  # import a folder
+curator consolidate PATH             # plan a cleanup (--execute to run it)
+curator scan PATH                    # compare a folder to the catalog
+curator health                       # check the catalog
+curator analyze PATH                 # score photos
+curator propose ASSET                # suggest a layout
+curator manifest ASSET               # make an art-direction file
+curator render ASSET --target 4k     # render an image
+curator validate FILE ...            # check a rendered file
+curator review                       # see approvals
+curator review approve ASSET         # approve a photo
+curator headless start               # run the server
 ```
 
-The FastAPI app is also importable (`curator.api:create_app`) and serves the
-Darkroom Bench web UI plus `/docs` on loopback `127.0.0.1:8765`.
+The web app runs at `127.0.0.1:8765` (the FastAPI app, also importable as
+`curator.api`).
 
 ## Configuration
 
-Configuration is read from environment variables prefixed with `CURATOR_`; nested
-axis fields use a `__` delimiter. The primary knob:
+Set the `CURATOR_DATA_ROOT` environment variable to choose where data is stored
+(default: `~/.curator`). Other options follow the pattern
+`CURATOR_<AXIS>__<FIELD>`, for example `CURATOR_SOURCE__TYPE=local`.
 
-| Env var              | Purpose                                 | Default     |
-|----------------------|-----------------------------------------|-------------|
-| `CURATOR_DATA_ROOT`  | Root directory for catalog.db + blobs    | `~/.curator`|
+## Notes
 
-Per-axis overrides follow the pattern `CURATOR_<AXIS>__<FIELD>`, e.g.
-`CURATOR_SOURCE__TYPE=local`. `CURATOR_NETWORK=deny` is a documented no-op
-air-gap posture; the real protection is the static no-network-import audit in
-the acceptance gate.
-
-## Project layout
-
-```
-src/curator/
-  analysis/     analysis contract, offline local engine, analysis pipeline
-  artdirection/ ArtDirectionManifest + policy engine
-  approve/      approval & history service
-  catalog.py    content-addressed catalog + content store
-  collections/  playlists + deterministic rotation
-  connectors/   local + synthetic remote + Immich connectors
-  consolidate/  consolidation plan + executor
-  dest/         destination adapters (filesystem/simulator/Samsung)
-  ha.py         Home Assistant coordination (exclusive write lease)
-  ingest/       ingest pipeline, decode, clustering, report
-  jobs/         crash-safe job orchestrator
-  migrate/      legacy SSD migration tool
-  providers/    cloud/hybrid provider routing + privacy
-  render/       deterministic renderer + artifact validator
-  taste/        Taste Lens profiles, ranking, pairwise, controls, discovery
-  watch/        durable watcher
-  cli.py        headless CLI (stable exit codes, --json)
-  api.py        FastAPI app + Darkroom Bench web UI
-```
-
-## Notes on scope
-
-- Live Samsung / Home Assistant / Immich / cloud transports are capability-probed
-  and exercised against simulator/synthetic runtimes in the acceptance gate. The
-  project stays deterministic and air-gapped in tests.
-- R024 (full RAW development, ARW/CR3/NEF) is deferred; recognized RAW files
-  surface an explicit unsupported/preview status rather than disappearing.
-- R025 (generative outpainting/restoration), R026 (face identity), and R027
-  (deleting destination art when a source disappears) are out of scope by design.
+- Real devices (Samsung, Home Assistant, Immich, cloud) are tested against
+  simulators, so the project stays deterministic and offline in its tests.
+- Full RAW editing (ARW/CR3/NEF) isn't built yet; those files show a clear
+  "unsupported" status instead of disappearing.
 
 ## License
 
