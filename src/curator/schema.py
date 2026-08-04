@@ -436,6 +436,47 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_key
     ON jobs(key);
 """
 
+# Migration v13 (M007/S01): adds the ``taste_profiles`` and ``taste_preferences``
+# tables backing the taste subsystem's profile-driven deterministic reranking.
+# Mirroring the v4-v12 posture (plain INTEGER FK/registry rows, JSON blobs for
+# per-row config, wall-clock ``created_at`` defaults):
+#
+# - ``taste_profiles``    — one row per taste profile. ``uid`` holds the profile's
+#   string id (UNIQUE); ``kind`` names its scope (personal/household/room/...),
+#   ``weights_json`` the full JSON serialization of the per-signal weights, and
+#   ``version`` the profile's schema version. An index on ``kind`` supports
+#   scope-scoped queries.
+# - ``taste_preferences`` — optional per-entry preference rows for S02 (learning),
+#   kept separate so renderer/approval paths never depend on them.
+SCHEMA_V13_SQL = """
+CREATE TABLE IF NOT EXISTS taste_profiles (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid          TEXT,
+    kind         TEXT NOT NULL,
+    name         TEXT,
+    version      INTEGER NOT NULL DEFAULT 1,
+    weights_json TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT,
+    UNIQUE(uid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_profiles_kind
+    ON taste_profiles(kind);
+
+CREATE TABLE IF NOT EXISTS taste_preferences (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id       INTEGER NOT NULL,
+    catalog_entry_id INTEGER NOT NULL,
+    preference       INTEGER NOT NULL DEFAULT 0,
+    note             TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_preferences_profile
+    ON taste_preferences(profile_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -450,6 +491,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (10, SCHEMA_V10_SQL),
     (11, SCHEMA_V11_SQL),
     (12, SCHEMA_V12_SQL),
+    (13, SCHEMA_V13_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -479,4 +521,6 @@ EXPECTED_TABLES: list[str] = [
     "immich_sync_state",
     "immich_asset_state",
     "jobs",
+    "taste_profiles",
+    "taste_preferences",
 ]
