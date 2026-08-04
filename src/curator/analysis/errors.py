@@ -22,3 +22,7 @@ class SchemaVersionError(AnalysisError):
 
 class ComputeBackendError(AnalysisError):
     """Raised when strict-device resolution demands an unavailable backend."""
+
+
+class CatalogEntryNotFound(AnalysisError):
+    """Raised when a source cannot be mapped to an existing catalog entry."""

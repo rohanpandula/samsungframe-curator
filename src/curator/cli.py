@@ -27,6 +27,21 @@ import sys
 from pathlib import Path
 
 from curator import db
+from curator.analysis.cli_utils import resolve_catalog_entry
+from curator.analysis.errors import CatalogEntryNotFound
+from curator.analysis.local import LocalAnalysisProvider
+from curator.analysis.pipeline import AnalysisAsset, AnalysisPipeline
+from curator.analysis.profiles import AnalysisProfile
+from curator.analysis.schema import AnalysisResult
+from curator.artdirection.manifest import MANIFEST_VERSION, ArtDirectionManifest
+from curator.artdirection.policy import (
+    ArtDirectionRequest,
+    TreatmentProposal,
+    materialize_manifest,
+)
+from curator.artdirection.policy import (
+    propose as policy_propose,
+)
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.consolidate import ConsolidationExecutor, ConsolidationPlan, build_plan
@@ -46,6 +61,15 @@ EXIT_NO_CHANGE = 3
 # Connector instance used for ad-hoc ``catalog add`` invocations. The source identity
 # is the normalized absolute file path, consistent with LocalConnector semantics.
 _CLI_CONNECTOR_ID = "cli-local"
+
+# Known render targets (name -> pixel dimensions) for ``propose`` / ``manifest``.
+_TARGET_SPECS: dict[str, tuple[int, int]] = {
+    "1080p": (1920, 1080),
+    "4k": (3840, 2160),
+}
+
+#: Default render target, matching the configured S01 render output profile.
+DEFAULT_TARGET = "1080p"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +145,63 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the catalog diff as structured JSON",
+    )
+
+    analyze = sub.add_parser(
+        "analyze",
+        help="analyze a folder's cataloged assets (offline local engine)",
+    )
+    analyze.add_argument("path", help="path to the local folder to analyze")
+    analyze.add_argument(
+        "--profile",
+        choices=("fast", "balanced", "quality", "max"),
+        default="balanced",
+        help="analysis workload profile (default: balanced)",
+    )
+    analyze.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the analysis run report as structured JSON",
+    )
+
+    propose = sub.add_parser(
+        "propose",
+        help="rank art-direction treatments for a single cataloged asset",
+    )
+    propose.add_argument(
+        "asset", help="path to a cataloged local media asset"
+    )
+    propose.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help=f"render target (default: {DEFAULT_TARGET})",
+    )
+    propose.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the ranked proposals as structured JSON",
+    )
+
+    manifest = sub.add_parser(
+        "manifest",
+        help="build an Art Direction Manifest for a cataloged asset",
+    )
+    manifest.add_argument(
+        "asset", help="path to a cataloged local media asset"
+    )
+    manifest.add_argument(
+        "--treatment",
+        help="select a specific treatment from the asset's proposals",
+    )
+    manifest.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help=f"resolve the manifest for a render target (default: {DEFAULT_TARGET})",
+    )
+    manifest.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the manifest as structured JSON",
     )
 
     return parser
@@ -337,6 +418,64 @@ def _format_scan(diff: ScanDiff) -> str:
     return "\n".join(lines)
 
 
+def _analyze(args: argparse.Namespace) -> int:
+    """Run the local analysis engine over *args.path*'s cataloged assets.
+
+    Maps every media file under *args.path* (LocalConnector semantics) to its
+    catalog entry id via :func:`resolve_catalog_entry`; assets that have not
+    been cataloged (e.g. RAW/corrupt files ingest skipped) are excluded. Runs
+    :class:`AnalysisPipeline` over those assets and prints a human-readable
+    report (specs via ``--profile``) or the :class:`AnalysisRunReport` as JSON
+    (``--json``). Returns :data:`EXIT_OK` (0) when nothing was corrupt/errored,
+    else :data:`EXIT_PARTIAL` (1).
+    """
+    folder = Path(args.path).resolve()
+    if not folder.is_dir():
+        raise CuratorError(f"analyze source is not a directory: {args.path!r}")
+    connector = LocalConnector(folder)
+    profile = AnalysisProfile(args.profile)
+    catalog = Catalog()
+    try:
+        assets: list[AnalysisAsset] = []
+        for meta in connector.enumerate():
+            try:
+                entry_id = resolve_catalog_entry(
+                    catalog, connector.connector_id, meta.asset_id
+                )
+            except CatalogEntryNotFound:
+                continue  # not cataloged — not part of this run
+            assets.append(AnalysisAsset(entry_id=entry_id, source=meta.asset_id))
+        report = AnalysisPipeline(
+            catalog, provider=LocalAnalysisProvider(), profile=profile
+        ).run(assets)
+    finally:
+        catalog.db.close()
+    if args.json:
+        print(report.to_json())
+    else:
+        print(_format_analysis(report))
+    return EXIT_PARTIAL if (report.corrupt_count + report.error_count) > 0 else EXIT_OK
+
+
+def _format_analysis(report) -> str:
+    """Render an :class:`AnalysisRunReport` as a human-readable summary."""
+    lines = [
+        f"analyze {report.profile} ({report.provider_version})",
+        f"  total     : {report.total_assets}",
+        f"  analyzed  : {report.analyzed_count}",
+        f"  corrupt   : {report.corrupt_count}",
+        f"  error     : {report.error_count}",
+    ]
+    corrupt = [e for e in report.entries if e.status in ("corrupt", "error")]
+    if corrupt:
+        lines.append("")
+        lines.append("corrupt / error:")
+        for entry in corrupt:
+            reason = f"  -> {entry.reason}" if entry.reason else ""
+            lines.append(f"  entry-{entry.entry_id} ({entry.status}){reason}")
+    return "\n".join(lines)
+
+
 def _format_plan(plan: ConsolidationPlan) -> str:
     """Render a :class:`ConsolidationPlan` as a human-readable dry-run report."""
     counts = plan.group_counts()
@@ -405,6 +544,270 @@ def _format_result(result) -> str:
     )
 
 
+def _target_dims(target: str) -> tuple[int, int]:
+    """Return ``(width, height)`` for a known render *target*.
+
+    Raises :class:`CuratorError` for an unknown target so the CLI surfaces a
+    fatal (exit 2) rather than silently guessing.
+    """
+    dims = _TARGET_SPECS.get(target)
+    if dims is None:
+        raise CuratorError(
+            f"unknown target {target!r} (known: {', '.join(sorted(_TARGET_SPECS))})"
+        )
+    return dims
+
+
+def _resolve_asset(path: Path) -> tuple[Catalog, int, str]:
+    """Return the catalog entry id for *path* plus the owning :class:`Catalog`.
+
+    The asset's parent folder supplies the LocalConnector so the connector id
+    matches the one ingest wrote. Raises :class:`CatalogEntryNotFound` (and
+    through ``main``, a fatal exit 2) when the asset has not been cataloged.
+    """
+    connector = LocalConnector(path.parent)
+    catalog = Catalog()
+    try:
+        entry_id = resolve_catalog_entry(catalog, connector.connector_id, str(path))
+    except Exception:
+        catalog.db.close()
+        raise
+    return catalog, entry_id, str(path)
+
+
+def _load_analysis(catalog: Catalog, entry_id: int) -> AnalysisResult | None:
+    """Return the newest persisted ``ok`` :class:`AnalysisResult` for *entry_id*.
+
+    Used by ``propose`` / ``manifest`` to reuse a prior deterministic analysis
+    (the documented reuse path) instead of re-analyzing, when one exists.
+    """
+    row = catalog.db.execute(
+        "SELECT analysis_json FROM analysis_results"
+        " WHERE catalog_entry_id = ? AND status = 'ok' ORDER BY id DESC LIMIT 1",
+        (entry_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return AnalysisResult.from_dict(json.loads(row[0]))
+
+
+def _analyze_or_reuse(
+    catalog: Catalog, entry_id: int, source: str, request: ArtDirectionRequest
+) -> list[TreatmentProposal]:
+    """Run the policy engine, reusing persisted analysis when available.
+
+    Prefers the newest persisted ``ok`` analysis (deterministic + fast), falling
+    back to a fresh local analysis of *source* bytes otherwise. Returns the
+    ranked :class:`TreatmentProposal` list.
+    """
+    persisted = _load_analysis(catalog, entry_id)
+    if persisted is not None:
+        return policy_propose([source], request, analysis=[persisted])
+    return policy_propose([source], request, provider=LocalAnalysisProvider())
+
+
+def _propose(args: argparse.Namespace) -> int:
+    """Propose art-direction treatments for a single cataloged asset.
+
+    Resolves *args.asset* to its catalog entry, derives an :class:`AnalysisResult`
+    (reusing a persisted one, else analyzing fresh), runs the S03 policy engine,
+    persists the resulting proposals to ``proposals`` (append-only), and prints
+    them ranked (human or ``--json``). Returns :data:`EXIT_OK` (0) when proposals
+    exist, :data:`EXIT_NO_CHANGE` (3) when the policy produced none.
+    """
+    path = Path(args.asset).resolve()
+    if not path.is_file():
+        raise CuratorError(f"propose source is not a file: {args.asset!r}")
+    width, height = _target_dims(args.target)
+    request = ArtDirectionRequest(
+        target=args.target,
+        target_width=width,
+        target_height=height,
+        sources=[str(path)],
+    )
+    catalog, entry_id, source = _resolve_asset(path)
+    try:
+        proposals = _analyze_or_reuse(catalog, entry_id, source, request)
+        _persist_proposals(catalog, entry_id, proposals)
+    finally:
+        catalog.db.close()
+    if not proposals:
+        return EXIT_NO_CHANGE
+    if args.json:
+        print(json.dumps([p.to_dict() for p in proposals], indent=2, ensure_ascii=False))
+    else:
+        print(_format_proposals(proposals))
+    return EXIT_OK
+
+
+def _manifest(args: argparse.Namespace) -> int:
+    """Build and persist an :class:`ArtDirectionManifest` for a cataloged asset.
+
+    Chooses a :class:`TreatmentProposal` (the ``--treatment`` one, else the
+    top-ranked) for the asset's catalog entry, materializes a base manifest via
+    :func:`materialize_manifest`, attaches deterministic per-target overrides,
+    resolves the base for ``--target``, and persists the validated result to
+    ``art_direction_manifests`` (append-only). Returns :data:`EXIT_OK` (0).
+    """
+    path = Path(args.asset).resolve()
+    if not path.is_file():
+        raise CuratorError(f"manifest source is not a file: {args.asset!r}")
+    base_width, base_height = _target_dims(DEFAULT_TARGET)
+    request = ArtDirectionRequest(
+        target=DEFAULT_TARGET,
+        target_width=base_width,
+        target_height=base_height,
+        sources=[str(path)],
+    )
+    catalog, entry_id, source = _resolve_asset(path)
+    try:
+        proposal = _select_proposal(catalog, entry_id, args.treatment, source, request)
+        base = _attach_target_overrides(
+            materialize_manifest(proposal, request, [source])
+        )
+        manifest = base.resolved_for(args.target)
+        _persist_manifest(catalog, entry_id, manifest)
+    finally:
+        catalog.db.close()
+    if args.json:
+        print(json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(_format_manifest(manifest))
+    return EXIT_OK
+
+
+def _select_proposal(
+    catalog: Catalog,
+    entry_id: int,
+    treatment: str | None,
+    source: str,
+    request: ArtDirectionRequest,
+) -> TreatmentProposal:
+    """Return the chosen proposal for *entry_id*, generating it if needed.
+
+    Prefers an already-persisted proposal (matching *treatment* when given),
+    else falls back to running the policy engine (persisting its output).
+    Raises :class:`CuratorError` when no proposal can be produced.
+    """
+    rows = _load_proposals(catalog, entry_id, treatment)
+    if not rows:
+        fresh = _analyze_or_reuse(catalog, entry_id, source, request)
+        _persist_proposals(catalog, entry_id, fresh)
+        rows = _load_proposals(catalog, entry_id, treatment)
+    if not rows:
+        raise CuratorError(f"no proposal available to manifest for catalog entry {entry_id}")
+    return rows[0]
+
+
+def _load_proposals(
+    catalog: Catalog, entry_id: int, treatment: str | None = None
+) -> list[TreatmentProposal]:
+    """Return persisted proposals for *entry_id*, ranked by score descending."""
+    if treatment is not None:
+        cur = catalog.db.execute(
+            "SELECT treatment, score, rationale_json, evidence_json FROM proposals"
+            " WHERE catalog_entry_id = ? AND treatment = ? ORDER BY score DESC, id",
+            (entry_id, treatment),
+        )
+    else:
+        cur = catalog.db.execute(
+            "SELECT treatment, score, rationale_json, evidence_json FROM proposals"
+            " WHERE catalog_entry_id = ? ORDER BY score DESC, id",
+            (entry_id,),
+        )
+    out: list[TreatmentProposal] = []
+    for row in cur.fetchall():
+        out.append(
+            TreatmentProposal.from_dict(
+                {
+                    "treatment": row[0],
+                    "score": row[1],
+                    "rationale": json.loads(row[2]) if row[2] else [],
+                    "evidence": json.loads(row[3]) if row[3] else {},
+                }
+            )
+        )
+    return out
+
+
+def _persist_proposals(
+    catalog: Catalog, entry_id: int, proposals: list[TreatmentProposal]
+) -> None:
+    """Append *proposals* to the append-only ``proposals`` table (schema v5)."""
+    for proposal in proposals:
+        catalog.db.execute(
+            "INSERT INTO proposals"
+            " (catalog_entry_id, treatment, score, rationale_json, evidence_json)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                entry_id,
+                proposal.treatment.value,
+                proposal.score,
+                json.dumps(proposal.rationale),
+                json.dumps(proposal.evidence),
+            ),
+        )
+    catalog.db.commit()
+
+
+def _persist_manifest(
+    catalog: Catalog, entry_id: int, manifest: ArtDirectionManifest
+) -> None:
+    """Append a manifest row to ``art_direction_manifests`` (schema v5)."""
+    catalog.db.execute(
+        "INSERT INTO art_direction_manifests"
+        " (catalog_entry_id, manifest_version, manifest_json) VALUES (?, ?, ?)",
+        (entry_id, MANIFEST_VERSION, json.dumps(manifest.to_dict())),
+    )
+    catalog.db.commit()
+
+
+def _attach_target_overrides(base: ArtDirectionManifest) -> ArtDirectionManifest:
+    """Attach deterministic per-target overrides to *base*.
+
+    A non-default target (currently ``4k``) carries a processing override that
+    records the upscaling risk of rendering a 1080p-class source up to 4K, so
+    ``resolved_for(target)`` has an observable effect (override precedence).
+    """
+    base_dims = _TARGET_SPECS[DEFAULT_TARGET]
+    overrides: dict[str, dict] = {}
+    for name, dims in _TARGET_SPECS.items():
+        if dims != base_dims:
+            overrides[name] = {"processing_intent": {"upscale_warning": True}}
+    if not overrides:
+        return base
+    data = base.to_dict()
+    data["target_overrides"] = overrides
+    return ArtDirectionManifest.from_dict(data)
+
+
+def _format_proposals(proposals: list[TreatmentProposal]) -> str:
+    """Render a ranked :class:`TreatmentProposal` list for humans."""
+    lines = ["proposals (ranked):"]
+    for idx, proposal in enumerate(proposals, 1):
+        lines.append(f"  {idx}. {proposal.treatment.value}  score={proposal.score:.4f}")
+        lines.extend(f"      - {r}" for r in proposal.rationale)
+    return "\n".join(lines)
+
+
+def _format_manifest(manifest: ArtDirectionManifest) -> str:
+    """Render an :class:`ArtDirectionManifest` as a human-readable summary."""
+    lines = [
+        f"manifest v{manifest.manifest_version}"
+        f"  treatment={manifest.layout_treatment.value}",
+        f"  sources     : {', '.join(manifest.sources) if manifest.sources else '-'}",
+        f"  background  : {manifest.background.background_choice}",
+    ]
+    if manifest.rationale:
+        lines.append("  rationale   :")
+        lines.extend(f"      - {r}" for r in manifest.rationale)
+    if manifest.target_overrides:
+        lines.append(
+            "  target overrides: " + ", ".join(sorted(manifest.target_overrides))
+        )
+    return "\n".join(lines)
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Route parsed args to the matching subcommand handler."""
     if args.command == "catalog":
@@ -424,6 +827,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _health(args)
     if args.command == "scan":
         return _scan(args)
+    if args.command == "analyze":
+        return _analyze(args)
+    if args.command == "propose":
+        return _propose(args)
+    if args.command == "manifest":
+        return _manifest(args)
     # Unreachable given required subparsers; defensive fallback.
     return EXIT_FATAL
 

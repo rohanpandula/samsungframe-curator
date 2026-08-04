@@ -189,12 +189,44 @@ CREATE INDEX IF NOT EXISTS idx_analysis_results_catalog_entry
     ON analysis_results(catalog_entry_id);
 """
 
+# Migration v5 (M002/S04): adds the append-only ``proposals`` (derived
+# treatment recommendations) and ``art_direction_manifests`` (per-entry art-direction
+# payloads) tables. Both mirror the ``analysis_results`` posture — a plain INTEGER
+# ``catalog_entry_id`` with an index (no enforced FK) so rows append without
+# coupling to ingest ordering, and a wall-clock ``created_at`` default.
+SCHEMA_V5_SQL = """
+CREATE TABLE IF NOT EXISTS proposals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_entry_id  INTEGER NOT NULL,
+    treatment         TEXT NOT NULL,
+    score             REAL,
+    rationale_json    TEXT,
+    evidence_json     TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_proposals_catalog_entry
+    ON proposals(catalog_entry_id);
+
+CREATE TABLE IF NOT EXISTS art_direction_manifests (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_entry_id  INTEGER NOT NULL,
+    manifest_version  TEXT NOT NULL,
+    manifest_json     TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_art_direction_manifests_catalog_entry
+    ON art_direction_manifests(catalog_entry_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
     (2, SCHEMA_V2_SQL),
     (3, SCHEMA_V3_SQL),
     (4, SCHEMA_V4_SQL),
+    (5, SCHEMA_V5_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -212,4 +244,6 @@ EXPECTED_TABLES: list[str] = [
     "consolidation_journal",
     "content_image",
     "analysis_results",
+    "proposals",
+    "art_direction_manifests",
 ]
