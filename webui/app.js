@@ -6,6 +6,8 @@
     decisions: {},
     selected: null,
     lastRender: null,
+    reviewEntries: [],
+    reviewFilter: "pending",
   };
 
   var $ = function (id) {
@@ -396,13 +398,12 @@
     body.replaceChildren(report);
   }
 
-  function reviewAction(action) {
+  function reviewAction(action, assetId) {
     return function () {
-      if (!state.selected) {
+      if (!assetId) {
         setStatus("Select a catalog entry first.", true);
         return;
       }
-      var assetId = state.selected.asset_id;
       return runAction(
         action,
         function () {
@@ -412,6 +413,7 @@
           state.decisions[assetId] = data.decision || "pending";
           renderCards();
           renderDetails();
+          renderReview();
         }
       );
     };
@@ -424,19 +426,124 @@
     return (n / 1048576).toFixed(1) + " MB";
   }
 
+  // -- review queue (M004/S03 T2) ------------------------------------------
+
+  function reviewRow(item) {
+    var decision = item.decision || "pending";
+    var row = el("li", "review-row");
+    row.setAttribute("role", "listitem");
+
+    row.append(el("span", "review-name", item.asset_id));
+
+    var badge = el("span", "decision " + decision, decision);
+    row.append(badge);
+
+    var actions = el("div", "review-actions");
+    actions.setAttribute("role", "group");
+    actions.setAttribute("aria-label", "Review actions for " + item.asset_id);
+
+    var approve = el("button", "btn approve small", "Approve");
+    approve.type = "button";
+    approve.setAttribute(
+      "aria-label",
+      "Approve " + item.asset_id
+    );
+    approve.addEventListener("click", reviewAction("approve", item.asset_id));
+
+    var reject = el("button", "btn reject small", "Reject");
+    reject.type = "button";
+    reject.setAttribute("aria-label", "Reject " + item.asset_id);
+    reject.addEventListener("click", reviewAction("reject", item.asset_id));
+
+    var undo = el("button", "btn small", "Undo");
+    undo.type = "button";
+    undo.setAttribute(
+      "aria-label",
+      "Undo decision for " + item.asset_id
+    );
+    undo.addEventListener("click", reviewAction("undo", item.asset_id));
+
+    actions.append(approve, reject, undo);
+    row.append(actions);
+
+    if (Array.isArray(item.history) && item.history.length) {
+      var history = el(
+        "span",
+        "review-history",
+        "history: " + item.history.join(" · ")
+      );
+      row.append(history);
+    }
+    return row;
+  }
+
+  function renderReview() {
+    var list = $("review-list");
+    var filter = state.reviewFilter;
+    var rows = state.reviewEntries.filter(function (item) {
+      var d = item.decision || "pending";
+      if (filter === "all") return true;
+      return d === filter;
+    });
+    var status = $("review-status");
+    status.textContent = rows.length + " entr" + (rows.length === 1 ? "y" : "ies") +
+      " (" + (filter === "all" ? "all decisions" : filter) + ").";
+
+    if (!rows.length) {
+      var empty = el("li", "empty", "No entries with this decision.");
+      empty.setAttribute("role", "listitem");
+      list.replaceChildren(empty);
+      return;
+    }
+    var items = rows.map(reviewRow);
+    list.replaceChildren.apply(list, items);
+  }
+
+  function setFilter(filter) {
+    state.reviewFilter = filter;
+    ["pending", "approved", "rejected", "all"].forEach(function (key) {
+      var btn = $("filter-" + key);
+      if (btn) btn.setAttribute("aria-pressed", key === filter ? "true" : "false");
+    });
+    renderReview();
+  }
+
+  // -- view switching --------------------------------------------------------
+
+  function showView(view) {
+    $("catalog-view").hidden = view !== "catalog";
+    $("review-view").hidden = view !== "review";
+    var navs = { catalog: $("nav-catalog"), review: $("nav-review") };
+    Object.keys(navs).forEach(function (key) {
+      if (key === view) {
+        navs[key].setAttribute("aria-current", "page");
+      } else {
+        navs[key].removeAttribute("aria-current");
+      }
+    });
+    if (view === "review") renderReview();
+  }
+
   // -- boot ------------------------------------------------------------------
+
+  async function loadReview() {
+    var review = await fetchJSON("/api/review");
+    state.reviewEntries = review;
+    state.decisions = {};
+    review.forEach(function (r) {
+      state.decisions[r.asset_id] = r.decision || "pending";
+    });
+  }
 
   async function loadCatalog() {
     setStatus("Loading catalog…");
     try {
       var entries = await fetchJSON("/catalog");
-      var review = await fetchJSON("/api/review");
+      await loadReview();
       state.entries = entries;
-      state.decisions = {};
-      review.forEach(function (r) {
-        state.decisions[r.asset_id] = r.decision || "pending";
-      });
+      state.reviewEntries = state.reviewEntries || [];
       renderCards();
+      renderReview();
       setStatus(entries.length + " catalog entr" + (entries.length === 1 ? "y" : "ies") + ".");
     } catch (err) {
       setStatus("Failed to load catalog.", true);
@@ -453,9 +560,29 @@
     renderTo("4k");
   });
   $("validate").addEventListener("click", validate);
-  $("approve").addEventListener("click", reviewAction("approve"));
-  $("reject").addEventListener("click", reviewAction("reject"));
-  $("undo").addEventListener("click", reviewAction("undo"));
+  $("approve").addEventListener("click", function () {
+    return reviewAction("approve", state.selected ? state.selected.asset_id : null)();
+  });
+  $("reject").addEventListener("click", function () {
+    return reviewAction("reject", state.selected ? state.selected.asset_id : null)();
+  });
+  $("undo").addEventListener("click", function () {
+    return reviewAction("undo", state.selected ? state.selected.asset_id : null)();
+  });
+
+  $("nav-catalog").addEventListener("click", function (e) {
+    e.preventDefault();
+    showView("catalog");
+  });
+  $("nav-review").addEventListener("click", function (e) {
+    e.preventDefault();
+    showView("review");
+  });
+  ["pending", "approved", "rejected", "all"].forEach(function (key) {
+    $("filter-" + key).addEventListener("click", function () {
+      setFilter(key);
+    });
+  });
 
   loadCatalog();
 })();

@@ -240,6 +240,31 @@ CREATE INDEX IF NOT EXISTS idx_approvals_catalog_entry
     ON approvals(catalog_entry_id);
 """
 
+# Migration v7 (M004/S03): adds the append-only ``renders`` table capturing one
+# row per persisted render artifact, mirroring the ``analysis_results`` /
+# ``proposals``/``approvals`` posture — a plain INTEGER ``catalog_entry_id`` with
+# an index (nullable, since a render may target an inline source with no catalog
+# entry), a wall-clock ``created_at`` default, and a hashed reference to the
+# stored artifact rather than a raw FK. ``artifact_sha`` is the byte-deterministic
+# SHA-256 of the rendered PNG bytes as stored in the ContentStore.
+SCHEMA_V7_SQL = """
+CREATE TABLE IF NOT EXISTS renders (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_entry_id  INTEGER,
+    target            TEXT,
+    renderer_version  TEXT,
+    artifact_sha      TEXT,
+    render_json       TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_renders_catalog_entry
+    ON renders(catalog_entry_id);
+
+CREATE INDEX IF NOT EXISTS idx_renders_artifact_sha
+    ON renders(artifact_sha);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -248,6 +273,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (4, SCHEMA_V4_SQL),
     (5, SCHEMA_V5_SQL),
     (6, SCHEMA_V6_SQL),
+    (7, SCHEMA_V7_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -268,4 +294,5 @@ EXPECTED_TABLES: list[str] = [
     "proposals",
     "art_direction_manifests",
     "approvals",
+    "renders",
 ]

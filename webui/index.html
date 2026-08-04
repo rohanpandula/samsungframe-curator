@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/app/styles.css">
 </head>
 <body>
-  <a class="skip-link" href="#main">Skip to catalog</a>
+  <a class="skip-link" href="#main">Skip to main content</a>
   <header>
     <div class="brand">
       <h1>Darkroom Bench</h1>
@@ -21,12 +21,13 @@
       </select>
     </div>
     <nav aria-label="Sections">
-      <a href="#catalog">Catalog</a>
-      <a href="#details">Details</a>
+      <a href="#catalog" id="nav-catalog" aria-current="page">Catalog</a>
+      <a href="#review" id="nav-review">Review</a>
     </nav>
   </header>
 
   <main id="main">
+    <div id="catalog-view" class="catalog-view">
     <section id="catalog" aria-label="Catalog" class="catalog">
       <h2>Catalog</h2>
       <div id="catalog-grid" class="catalog-grid"></div>
@@ -92,6 +93,21 @@
         </section>
       </div>
     </aside>
+    </div>
+
+    <section id="review-view" class="review" aria-label="Review queue" data-review-mode="queue" hidden>
+      <h2>Review</h2>
+      <div class="review-toolbar">
+        <div class="filter-group" role="group" aria-label="Filter review queue by decision">
+          <button type="button" class="filter-btn" id="filter-pending" aria-pressed="true">Pending</button>
+          <button type="button" class="filter-btn" id="filter-approved" aria-pressed="false">Approved</button>
+          <button type="button" class="filter-btn" id="filter-rejected" aria-pressed="false">Rejected</button>
+          <button type="button" class="filter-btn" id="filter-all" aria-pressed="false">All</button>
+        </div>
+        <p id="review-status" class="status-text muted" role="status" aria-live="polite"></p>
+      </div>
+      <ul id="review-list" class="review-list"></ul>
+    </section>
   </main>
 
   <div id="message" class="toast" role="alert" aria-live="assertive"></div>

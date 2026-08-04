@@ -21,6 +21,7 @@ from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.hashing import sha256_hex
 from curator.render.renderer import DeterministicRenderer
+from curator.schema import MIGRATIONS
 
 
 @pytest.fixture
@@ -163,6 +164,102 @@ def test_webui_existing_endpoints_still_work(client, catalog, tmp_path):
     catalog_resp = client.get("/catalog")
     assert catalog_resp.status_code == 200
     assert len(catalog_resp.json()) == 1
+
+
+# -- review queue UI + accessibility (M004/S03 T2) -----------------------------
+
+
+def test_webui_review_mode_and_a11y_markup(client):
+    """The served SPA exposes the review queue view and a11y affordances."""
+    text = client.get("/").text
+
+    assert 'data-review-mode="queue"' in text
+    assert 'id="review-view"' in text
+    assert 'aria-label="Review queue"' in text
+
+    # navigation with both views + current-state hint
+    assert 'aria-label="Sections"' in text
+    assert 'id="nav-catalog"' in text
+    assert 'id="nav-review"' in text
+    assert 'aria-current="page"' in text
+
+    # skip link + landmarks + live regions
+    assert 'class="skip-link"' in text
+    assert 'href="#main"' in text
+    assert 'role="status"' in text
+    assert 'aria-live="polite"' in text
+    assert 'aria-live="assertive"' in text
+    assert 'role="alert"' in text
+
+    # review actions + filter controls labeled
+    for label in ("Approve", "Reject", "Undo", "Pending", "Approved", "Rejected", "All"):
+        assert label in text
+    assert 'aria-label="Filter review queue by decision"' in text
+    assert 'aria-label=' in text  # action buttons carry explicit labels
+
+
+def test_webui_review_status_pending_returns_only_pending(client, catalog, tmp_path):
+    """GET /api/review?status=pending returns only undecided entries."""
+    asset_a = _seed(catalog, tmp_path, "a.png")
+    _seed(catalog, tmp_path, "b.png")
+    client.post("/api/review/approve", json={"asset": asset_a})
+
+    pending = client.get("/api/review", params={"status": "pending"}).json()
+    assert len(pending) == 1
+    assert pending[0]["asset_id"] != asset_a
+    assert pending[0]["decision"] is None
+
+
+def test_webui_review_approve_moves_out_of_pending(client, catalog, tmp_path):
+    """Approving an asset surfaces it under approved and removes it from pending."""
+    asset = _seed(catalog, tmp_path, "a.png")
+
+    pending_before = client.get(
+        "/api/review", params={"status": "pending"}
+    ).json()
+    assert asset in [r["asset_id"] for r in pending_before]
+
+    resp = client.post("/api/review/approve", json={"asset": asset})
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "approved"
+
+    approved = client.get("/api/review", params={"status": "approved"}).json()
+    pending = client.get("/api/review", params={"status": "pending"}).json()
+    assert asset in [r["asset_id"] for r in approved]
+    assert asset not in [r["asset_id"] for r in pending]
+
+
+def test_webui_review_undo_after_approve_flips_decision(client, catalog, tmp_path):
+    """Undo reverts an approve by moving the entry to the opposite decision.
+
+    The backend's undo is a flip (approved->rejected), not a return to pending,
+    because approval history is append-only (R010). This documents the actual
+    contract so the UI's shared decision state stays in sync.
+    """
+    asset = _seed(catalog, tmp_path, "a.png")
+    client.post("/api/review/approve", json={"asset": asset})
+
+    undo = client.post("/api/review/undo", json={"asset": asset})
+    assert undo.status_code == 200
+    assert undo.json()["decision"] == "rejected"
+
+    approved = client.get("/api/review", params={"status": "approved"}).json()
+    rejected = client.get("/api/review", params={"status": "rejected"}).json()
+    assert asset not in [r["asset_id"] for r in approved]
+    assert asset in [r["asset_id"] for r in rejected]
+
+
+def test_webui_review_reject_moves_out_of_pending(client, catalog, tmp_path):
+    """Rejecting an asset surfaces it under rejected and removes it from pending."""
+    asset = _seed(catalog, tmp_path, "a.png")
+    resp = client.post("/api/review/reject", json={"asset": asset})
+    assert resp.status_code == 200
+    assert resp.json()["decision"] == "rejected"
+
+    rejected = client.get("/api/review", params={"status": "rejected"}).json()
+    pending = client.get("/api/review", params={"status": "pending"}).json()
+    assert asset in [r["asset_id"] for r in rejected]
+    assert asset not in [r["asset_id"] for r in pending]
 
 
 # -- analyze / propose / render / validate (M004/S01 T2+T3) --------------------
@@ -316,3 +413,106 @@ def test_webui_analyze_malformed_body_4xx(client):
     resp = client.post("/api/analyze", json={})
     assert 400 <= resp.status_code < 500
     assert "asset" in str(resp.json()["detail"]).lower()
+
+
+# -- render persistence + schema v7 (M004/S03 T1) ------------------------------
+
+
+def test_webui_render_persists_artifact_and_returns_artifact_sha(client, catalog):
+    """A successful render stores the artifact in ContentStore and returns its sha."""
+    png = _png(3000, 2000)
+    sha = catalog.content.put(png)
+    resp = client.post("/api/render", json={"asset": sha, "target": "1080p"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["sha256"]
+    assert data["artifact_sha"] == data["sha256"]
+    assert data["artifact_sha"] == sha256_hex(catalog.content.get(data["artifact_sha"]))
+    assert catalog.content.exists(data["artifact_sha"])
+
+
+def test_webui_render_persists_renders_row(client, catalog):
+    """Rendering appends an entry to the ``renders`` table (schema v7)."""
+    png = _png(3000, 2000)
+    sha = catalog.content.put(png)
+    resp = client.post("/api/render", json={"asset": sha, "target": "1080p"})
+    assert resp.status_code == 200
+    artifact_sha = resp.json()["artifact_sha"]
+
+    rows = catalog.db.execute(
+        "SELECT catalog_entry_id, target, renderer_version, artifact_sha, render_json"
+        " FROM renders WHERE artifact_sha = ?",
+        (artifact_sha,),
+    ).fetchall()
+    assert len(rows) == 1
+    _, target, renderer_version, stored_sha, render_json = rows[0]
+    assert target == "1080p"
+    assert renderer_version
+    assert stored_sha == artifact_sha
+    assert artifact_sha in render_json
+
+
+def test_webui_validate_by_stored_artifact_sha_publishable(client, catalog):
+    """Validation by the stored artifact_sha from render reports publishable."""
+    png = _png(3000, 2000)
+    sha = catalog.content.put(png)
+    render = client.post("/api/render", json={"asset": sha, "target": "1080p"})
+    assert render.status_code == 200
+    artifact_sha = render.json()["artifact_sha"]
+
+    resp = client.post(
+        "/api/validate",
+        json={"artifact_sha": artifact_sha, "expected_sha": artifact_sha, "target": "1080p"},
+    )
+    assert resp.status_code == 200
+    report = resp.json()
+    assert report["publishable"] is True
+    assert report["valid"] is True
+
+
+def test_webui_validate_stored_artifact_tampered_expected_sha(client, catalog):
+    """A mismatched expected_sha against the stored artifact fails publishability."""
+    png = _png(3000, 2000)
+    sha = catalog.content.put(png)
+    render = client.post("/api/render", json={"asset": sha, "target": "1080p"})
+    assert render.status_code == 200
+    artifact_sha = render.json()["artifact_sha"]
+
+    resp = client.post(
+        "/api/validate",
+        json={
+            "artifact_sha": artifact_sha,
+            "expected_sha": "0" * 64,
+            "target": "1080p",
+        },
+    )
+    assert resp.status_code == 200
+    report = resp.json()
+    assert report["publishable"] is False
+    hash_check = next(c for c in report["checks"] if c["name"] == "hash")
+    assert hash_check["passed"] is False
+
+
+def test_webui_validate_unknown_artifact_sha_404(client):
+    """Validating a sha not present in the ContentStore returns 404."""
+    resp = client.post(
+        "/api/validate",
+        json={"artifact_sha": "f" * 64, "expected_sha": "0" * 64, "target": "1080p"},
+    )
+    assert resp.status_code == 404
+
+
+def test_schema_v7_migration_applies_renders_table(data_root, catalog):
+    """Migration 7 is present and creates the ``renders`` table."""
+    assert MIGRATIONS[-1][0] == 7
+    rows = catalog.db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='renders'"
+    ).fetchall()
+    assert len(rows) == 1
+    ddl = catalog.db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='renders'"
+    ).fetchall()
+    assert "catalog_entry_id" in ddl[0][0]
+    assert "artifact_sha" in ddl[0][0]
+    assert "render_json" in ddl[0][0]
+    assert "renderer_version" in ddl[0][0]

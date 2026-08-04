@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ from curator.consolidate.plan import build_plan
 from curator.errors import StorageError
 from curator.hashing import sha256_hex
 from curator.ingest.pipeline import IngestPipeline
-from curator.render.renderer import DeterministicRenderer, RenderError
+from curator.render.renderer import DeterministicRenderer, RenderError, RenderResult
 from curator.render.validate import ArtifactValidator
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
@@ -431,9 +432,50 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             for proposal in propose_treatments(results, art_request, provider=provider)
         ]
 
+    def _record_render(
+        catalog: Catalog,
+        manifest: ArtDirectionManifest,
+        target: tuple[int, int],
+        target_label: str,
+        result: RenderResult,
+        artifact_sha: str,
+    ) -> None:
+        """Persist one render row into the ``renders`` table (append-only)."""
+        entry_id: int | None = None
+        if manifest.sources:
+            for entry in catalog.get_by_hash(manifest.sources[0]):
+                entry_id = entry["id"]
+                break
+        catalog.db.execute(
+            "INSERT INTO renders"
+            " (catalog_entry_id, target, renderer_version, artifact_sha, render_json)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                entry_id,
+                target_label,
+                result.renderer_version,
+                artifact_sha,
+                json.dumps(result.to_dict()),
+            ),
+        )
+        catalog.db.commit()
+
+    def _target_label(
+        body: RenderRequest, target: tuple[int, int]
+    ) -> str:
+        """Return a readable target label for persistence (name or ``WxH``)."""
+        if isinstance(body.target, str):
+            return body.target
+        return f"{target[0]}x{target[1]}"
+
     @app.post("/api/render")
     def render(body: RenderRequest, request: Request) -> dict:
-        """Render a manifest/source to a target via DeterministicRenderer."""
+        """Render a manifest/source to a target via DeterministicRenderer.
+
+        The rendered PNG bytes are persisted into the ContentStore (content-
+        addressed by their SHA-256) and a ``renders`` journal row is appended.
+        The response expands :class:`RenderResult` with the stored ``artifact_sha``.
+        """
         catalog = _catalog(request)
         target = _parse_target(body.target, body.target_width, body.target_height)
         sources_b64 = body.sources or {}
@@ -446,10 +488,19 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             )
             for sha in manifest.sources
         }
+        renderer = DeterministicRenderer()
         try:
-            return DeterministicRenderer().render(manifest, sources, target).to_dict()
+            result = renderer.render(manifest, sources, target)
         except RenderError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        payload = renderer.render_bytes(manifest, sources, target)
+        artifact_sha = catalog.content.put(payload)
+        _record_render(
+            catalog, manifest, target, _target_label(body, target), result, artifact_sha
+        )
+        data = result.to_dict()
+        data["artifact_sha"] = artifact_sha
+        return data
 
     def _resolve_manifest(
         catalog: Catalog, body: RenderRequest, sources_b64: dict[str, str]
