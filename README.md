@@ -15,55 +15,55 @@ are no bespoke code paths for specific axis combinations.
 
 ## Current status
 
-Complete end to end. The baseline product (M001–M006) plus the Taste Lens
-personalization layer (M007) are delivered: **634 automated tests**, an
-8-file deterministic `make acceptance` gate, and **27 of 27 active requirements
-validated** (R024 full-RAW development is deferred; R025–R027 are explicitly out
-of scope).
+Complete end to end: **634 automated tests**, an 8-file deterministic
+`make acceptance` gate, and **27 of 27 active requirements validated**.
 
-What ships, by milestone:
+## Features
 
-- **M001 — Catalog & consolidation.** Content-addressed SQLite catalog and
-  SHA-256 artifact store; connector-scoped source identity; non-destructive SSD
-  consolidation (dry-run plan → staged copy → hash verify → atomic promote →
-  interrupt/resume); ingest of local folders/NAS (HEIC, JPEG, PNG, WebP, TIFF)
-  with exact + perceptual duplicate detection and best-original recovery; RAW
-  and corrupt files reported explicitly rather than dropped.
-- **M002 — Analysis & art direction.** A provider-neutral `AnalysisProvider`
-  boundary with a normalized `AnalysisResult`; an offline, deterministic CPU
-  engine computing perceptual representation, technical/aesthetic quality,
-  saliency and subjects, crop safety, color story, and pairing affinity; a
-  versioned `ArtDirectionManifest`; and a deterministic policy engine proposing
-  treatments (full-bleed, contain-and-matte, panoramic, square, diptych) with
-  rationale.
-- **M003 — Renderer & approval.** A deterministic Pillow renderer that renders
-  byte-identical 1080p/4K/custom sRGB output from one manifest (never upscales
-  silently); an artifact validator that gates publishability; an append-only
-  approval service (approve/reject/undo/redo/batch) with history.
-- **M004 — Web UI.** A dependency-light, accessible Darkroom Bench single-page
-  app over the loopback API: catalog browser, analysis/proposal/render/validate
-  actions, and a review queue. Keyboard-operable and WCAG 2.1 AA-affording.
-- **M005 — Adapters, watcher, collections.** Filesystem/simulator destination
-  adapters; Samsung Art Mode adapter (canary upload, exact-ID replace, rollback)
-  and Home Assistant coordination behind an exclusive write lease; a durable
-  watcher that ingests stabilized photos exactly once; collections/playlists
-  with deterministic rotation; a synthetic Immich connector with checkpointed,
-  idempotent sync, availability tombstones, and a disabled-by-default,
-  capability-checked feedback sink that never deletes.
-- **M006 — Cloud, orchestrator, hardening.** Cloud/hybrid provider routing with
-  plain-language privacy disclosure and per-source/per-image exclusions; a
-  crash-safe job orchestrator with six-way classified outcomes; packaging for
-  macOS launchd and Docker (CPU + optional CUDA profile) with a prompt-free
-  headless start; a migration tool that imports a legacy Samsung SSD folder
-  read-only, with backups before every mutation.
-- **M007 — Taste Lens.** Versioned, isolated preference profiles that rerank
-  candidates as a baseline-plus-delta with explainable contributions; pairwise
-  active-learning with measured, gated evidence; blend/veto and
-  replay/undo/export/reset/delete controls; approved output always renders
-  identically. Taste Lens Discovery is a separate surface: a federated,
-  outage-isolated creator catalog feeding a Taste Deck with artist spotlights,
-  likely/adjacent/wildcard modes, a Familiar↔Surprising dial, and pairwise
-  calibration.
+- **Content-addressed catalog.** SQLite + SHA-256 artifact store with
+  connector-scoped source identity; renames, moves, and remote revisions never
+  collide.
+- **Non-destructive consolidation.** Dry-run plan → staged copy → hash verify →
+  atomic promote, resumable after interruption. Sources stay untouched until you
+  approve archival.
+- **Local ingest.** HEIC, JPEG, PNG, WebP, TIFF from folders and NAS, with exact
+  and perceptual duplicate detection plus best-original recovery. RAW and
+  corrupt files report an explicit status instead of disappearing.
+- **Offline analysis.** A deterministic CPU engine scores technical and
+  aesthetic quality, saliency and subjects, crop safety, color story, and
+  pairing affinity. No cloud required.
+- **Art direction.** A policy engine proposes treatments — full-bleed,
+  contain-and-matte, panoramic, square, diptych — each with rationale, captured
+  in a versioned ArtDirectionManifest.
+- **Deterministic rendering.** Byte-identical 1080p / 4K / custom sRGB from one
+  manifest. A validator gates publishability; upscaling is never silent.
+- **Approval & history.** Per-image approve, reject, undo, redo, and batch, with
+  append-only history and rationale.
+- **Darkroom Bench web UI.** A dependency-light, accessible browser app for the
+  whole loop: browse, analyze, propose, render, validate, review. Keyboard- and
+  screen-reader-first.
+- **Safe publishing.** Filesystem and simulator destinations, Samsung Art Mode
+  (canary upload, exact-ID replace, rollback), and Home Assistant coordination
+  behind an exclusive write lease.
+- **Watcher & rotation.** A durable watcher ingests stabilized photos exactly
+  once. Collections and playlists rotate deterministically — intervals,
+  favorites, seasons, show-now.
+- **Immich connector.** Checkpointed, idempotent sync with availability
+  tombstones and a disabled-by-default feedback sink that never deletes.
+- **Cloud/hybrid opt-in.** Privacy-first routing with plain-language disclosure
+  and per-source/per-image exclusions. A provider outage pauses only
+  cloud-dependent work.
+- **Crash-safe jobs.** A durable orchestrator resumes from checkpoints without
+  duplicating art; every failure is classified with a recovery action.
+- **Production ready.** Packaging for macOS launchd and Docker (CPU + optional
+  CUDA), a prompt-free headless start, and a migration tool that imports a
+  legacy Samsung SSD read-only with backups before every mutation.
+- **Taste Lens.** Versioned, isolated profiles that rerank candidates as an
+  explainable baseline-plus-delta, tuned by pairwise comparisons — reversible in
+  one click, and it never changes approved output.
+- **Taste Lens Discovery.** A federated, outage-isolated creator catalog feeding
+  a Taste Deck with artist spotlights, likely/adjacent/wildcard modes, and a
+  Familiar↔Surprising dial.
 
 ## Getting started
 
