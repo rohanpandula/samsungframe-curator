@@ -167,11 +167,34 @@ CREATE INDEX IF NOT EXISTS idx_consolidation_journal_status
     ON consolidation_journal(status);
 """
 
+# Migration v4 (M002/S02 analysis): adds the append-only ``analysis_results``
+# table capturing one row per analysis run per catalog entry — a history-preserving
+# posture mirroring the ingest/consolidation journals. A corrupt/undecodable file
+# is recorded as a ``corrupt`` row with an actionable ``corrupt_reason`` rather than
+# silently dropped. ``catalog_entry_id`` is a plain INTEGER with an index (not an
+# enforced FK) so analysis may append rows without coupling to ingest ordering.
+SCHEMA_V4_SQL = """
+CREATE TABLE IF NOT EXISTS analysis_results (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_entry_id  INTEGER NOT NULL,
+    profile           TEXT NOT NULL,
+    engine_version    TEXT NOT NULL,
+    analysis_json     TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'ok',
+    corrupt_reason    TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_results_catalog_entry
+    ON analysis_results(catalog_entry_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
     (2, SCHEMA_V2_SQL),
     (3, SCHEMA_V3_SQL),
+    (4, SCHEMA_V4_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -188,4 +211,5 @@ EXPECTED_TABLES: list[str] = [
     "ingest_journal",
     "consolidation_journal",
     "content_image",
+    "analysis_results",
 ]
