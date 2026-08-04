@@ -503,8 +503,8 @@ def test_webui_validate_unknown_artifact_sha_404(client):
 
 
 def test_schema_v7_migration_applies_renders_table(data_root, catalog):
-    """Migration 7 is present and creates the ``renders`` table."""
-    assert MIGRATIONS[-1][0] == 7
+    """Migrations v7/v8 are present; the ``renders`` table exists."""
+    assert MIGRATIONS[-1][0] == 8
     rows = catalog.db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='renders'"
     ).fetchall()

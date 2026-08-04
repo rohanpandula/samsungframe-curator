@@ -265,6 +265,31 @@ CREATE INDEX IF NOT EXISTS idx_renders_artifact_sha
     ON renders(artifact_sha);
 """
 
+# Migration v8 (M005/S01): adds the append-only ``dest_journal`` table capturing
+# every publish attempt/transition per artifact, mirroring the ingest/consolidation
+# journal posture — one row per attempt advanced in place through the per-artifact
+# state machine (``staged -> verified -> applied | error``). ``adapter_id`` names the
+# :class:`~curator.dest.base.DestinationAdapter` instance, ``artifact_id`` the
+# exact-ID destination key, ``op`` the write operation (put/replace/remove), ``sha``
+# the published SHA-256, and ``status`` the terminal outcome. ``error`` preserves
+# the failure text so a retry can resume from the same row rather than duplicating
+# the error. History is never erased.
+SCHEMA_V8_SQL = """
+CREATE TABLE IF NOT EXISTS dest_journal (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    adapter_id  TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    op          TEXT NOT NULL,
+    sha         TEXT,
+    status      TEXT NOT NULL,
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_dest_journal_artifact
+    ON dest_journal(artifact_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -274,6 +299,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (5, SCHEMA_V5_SQL),
     (6, SCHEMA_V6_SQL),
     (7, SCHEMA_V7_SQL),
+    (8, SCHEMA_V8_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -295,4 +321,5 @@ EXPECTED_TABLES: list[str] = [
     "art_direction_manifests",
     "approvals",
     "renders",
+    "dest_journal",
 ]
