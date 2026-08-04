@@ -152,5 +152,4 @@ src/curator/
 
 ## License
 
-Public repository. No license file has been selected yet; contact the repository
-owner before reusing the code.
+Released under the [MIT License](LICENSE).
