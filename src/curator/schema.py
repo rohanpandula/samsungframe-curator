@@ -400,6 +400,42 @@ CREATE TABLE IF NOT EXISTS immich_asset_state (
 );
 """
 
+# Migration v12 (M006/S02): adds the append-only ``jobs`` table backing the durable
+# job orchestrator — a checkpointed, idempotent executor with classified outcomes. One
+# row per job; the ``key`` column holds a content-derived idempotency key (kind +
+# canonical payload JSON) with a UNIQUE index so the orchestrator can enqueue a job
+# once regardless of how many times the same work is requested. ``state`` walks
+# ``queued -> active -> checkpointed -> completed | error | cancelled``; a crash
+# between phases leaves ``active``/``checkpointed`` rows that a fresh orchestrator
+# rehydrates (``resume_after_restart``) with their ``checkpoint_json`` + ``phase``
+# intact, so no phase runs twice and content-addressed art is never duplicated.
+# ``phase`` names the current step so a multi-phase job resumes exactly where it
+# stopped, and the outcome columns (``outcome``/``reason``/``recovery``/
+# ``user_explanation``) record the six-way classified failure surface
+# (transient/permanent/policy-blocked/capability-unsupported/unresolved-external/
+# user-cancelled).
+SCHEMA_V12_SQL = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    key              TEXT NOT NULL,
+    kind             TEXT NOT NULL,
+    payload_json     TEXT,
+    state            TEXT NOT NULL,
+    phase            TEXT NOT NULL DEFAULT '',
+    checkpoint_json  TEXT,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    outcome          TEXT,
+    reason           TEXT,
+    recovery         TEXT,
+    user_explanation TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_key
+    ON jobs(key);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -413,6 +449,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (9, SCHEMA_V9_SQL),
     (10, SCHEMA_V10_SQL),
     (11, SCHEMA_V11_SQL),
+    (12, SCHEMA_V12_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -441,4 +478,5 @@ EXPECTED_TABLES: list[str] = [
     "rotation_state",
     "immich_sync_state",
     "immich_asset_state",
+    "jobs",
 ]
