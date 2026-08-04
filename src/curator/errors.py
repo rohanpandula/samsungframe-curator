@@ -35,3 +35,11 @@ class ConsolidationError(CuratorError):
     folder before every file reached ``promoted``, or archiving a folder that has
     already been archived.
     """
+
+
+class ApprovalError(CuratorError):
+    """Raised when an approval/decision operation is invalid.
+
+    Covers unknown catalog entry ids and undo/redo with nothing to revert or
+    re-apply for the given entry.
+    """

@@ -220,6 +220,26 @@ CREATE INDEX IF NOT EXISTS idx_art_direction_manifests_catalog_entry
     ON art_direction_manifests(catalog_entry_id);
 """
 
+# Migration v6 (M003/S03): adds the append-only ``approvals`` table capturing one
+# row per explicit per-entry decision/transition (approve/reject/undo/redo),
+# mirroring the ``analysis_results``/``proposals`` posture — a plain INTEGER
+# ``catalog_entry_id`` with an index (no enforced FK) so rows append without
+# coupling to ingest ordering, and a wall-clock ``created_at`` default. History is
+# never erased: "current" for an entry is simply the latest row; undo/redo append
+# new transition rows rather than rewriting/deleting prior ones.
+SCHEMA_V6_SQL = """
+CREATE TABLE IF NOT EXISTS approvals (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    catalog_entry_id  INTEGER NOT NULL,
+    decision          TEXT NOT NULL,
+    rationale         TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_catalog_entry
+    ON approvals(catalog_entry_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -227,6 +247,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (3, SCHEMA_V3_SQL),
     (4, SCHEMA_V4_SQL),
     (5, SCHEMA_V5_SQL),
+    (6, SCHEMA_V6_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -246,4 +267,5 @@ EXPECTED_TABLES: list[str] = [
     "analysis_results",
     "proposals",
     "art_direction_manifests",
+    "approvals",
 ]
