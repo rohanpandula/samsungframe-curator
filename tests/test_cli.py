@@ -117,7 +117,7 @@ def test_add_honors_custom_data_root(tmp_path, monkeypatch):
 def test_add_missing_file_returns_error(data_root, capsys):
     assert cli.main(["catalog", "init"]) == 0
     rc = cli.main(["catalog", "add", "/no/such/file.jpg"])
-    assert rc == 1
+    assert rc == 2
     err = capsys.readouterr().err
     assert "error" in err.lower()
 
@@ -207,7 +207,7 @@ def test_ingest_resume_is_idempotent(data_root, tmp_path, capsys):
 
 def test_ingest_missing_dir_returns_error(data_root, capsys):
     rc = cli.main(["ingest", "/no/such/dir"])
-    assert rc == 1
+    assert rc == 2
     err = capsys.readouterr().err
     assert "error" in err.lower()
 
@@ -349,6 +349,6 @@ def test_consolidate_execute_archive_moves_source(data_root, tmp_path, capsys):
 
 def test_consolidate_missing_dir_returns_error(data_root, tmp_path, capsys):
     rc = cli.main(["consolidate", "/no/such/folder"])
-    assert rc == 1
+    assert rc == 2
     err = capsys.readouterr().err
     assert "error" in err.lower()

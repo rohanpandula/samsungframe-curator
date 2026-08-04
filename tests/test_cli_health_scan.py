@@ -145,6 +145,6 @@ def test_scan_json_parseable(data_root, tmp_path, capsys):
 def test_scan_rejects_non_directory(data_root, tmp_path, capsys):
     """Scanning a non-directory source is a fatal CuratorError, like ingest."""
     rc = cli.main(["scan", str(tmp_path / "no-such-folder")])
-    assert rc == 1
+    assert rc == 2
     err = capsys.readouterr().err
     assert "not a directory" in err

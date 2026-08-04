@@ -441,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch(args)
     except (CuratorError, OSError) as exc:
         print(f"curator: error: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_FATAL
 
 
 if __name__ == "__main__":  # pragma: no cover - interactive entry
