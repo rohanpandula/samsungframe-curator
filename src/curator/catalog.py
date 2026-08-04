@@ -336,6 +336,15 @@ class Catalog:
             (cluster_id,),
         )
 
+    def list_entries(self) -> list[dict[str, Any]]:
+        """Return every catalog entry, oldest first, as a list of dict rows.
+
+        The S04 API's ``GET /catalog`` endpoint exposes this directly so operators
+        can read the full catalog as JSON. Each dict mirrors the column order of
+        ``SELECT *`` on ``catalog_entries`` (see ``_ENTRY_COLUMNS``).
+        """
+        return self._query("SELECT * FROM catalog_entries ORDER BY id")
+
     def count_catalog_entries(self) -> int:
         """Return the total number of rows in ``catalog_entries``.
 

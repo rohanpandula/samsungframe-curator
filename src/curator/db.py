@@ -36,7 +36,12 @@ def connect(data_root: Path | None = None) -> sqlite3.Connection:
     """
     path = default_db_path(data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(str(path))
+    # ``check_same_thread=False`` lets a single Catalog serve the S04 FastAPI app,
+    # whose ASGI workers (uvicorn / TestClient) may run requests on a thread other
+    # than the one that opened the connection. SQLite WAL serializes concurrent
+    # writers at the database level, so this is safe for the single-process,
+    # loopback-only API (MEM003). CLI/ingest paths are single-threaded.
+    db = sqlite3.connect(str(path), check_same_thread=False)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA foreign_keys=ON")
     return db
