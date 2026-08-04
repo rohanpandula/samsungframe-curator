@@ -1,47 +1,461 @@
-function render(candidates) {
-  const list = document.getElementById("candidates");
-  const empty = document.createElement("li");
-  empty.textContent = "No candidates to review.";
-  if (!candidates.length) {
-    list.replaceChildren(empty);
-    return;
+(function () {
+  "use strict";
+
+  var state = {
+    entries: [],
+    decisions: {},
+    selected: null,
+    lastRender: null,
+  };
+
+  var $ = function (id) {
+    return document.getElementById(id);
+  };
+
+  function setStatus(text, isError) {
+    var status = $("status");
+    status.textContent = text;
+    status.classList.toggle("error", Boolean(isError));
   }
-  const items = candidates.map((c) => {
-    const li = document.createElement("li");
-    const decision = c.decision ?? "pending";
 
-    const name = document.createElement("span");
-    name.textContent = c.asset_id;
+  var toastTimer = null;
+  function showToast(text, isError) {
+    var toast = $("message");
+    toast.textContent = text;
+    toast.classList.toggle("error", Boolean(isError));
+    toast.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      toast.classList.remove("show");
+    }, 3500);
+  }
 
-    const state = document.createElement("span");
-    state.className = `decision ${decision}`;
-    state.textContent = decision === "pending" ? "pending" : decision;
-
-    li.append(state, " — ", name);
-    return li;
-  });
-  list.replaceChildren(...items);
-}
-
-async function loadReview() {
-  const message = document.getElementById("message");
-  message.textContent = "";
-  message.className = "";
-  const status = document.getElementById("status").value;
-  const url = status
-    ? `/api/review?status=${encodeURIComponent(status)}`
-    : "/api/review";
-  try {
-    const resp = await fetch(url, { headers: { Accept: "application/json" } });
+  async function fetchJSON(url, options) {
+    var resp = await fetch(url, options);
     if (!resp.ok) {
-      throw new Error(`review request failed (${resp.status})`);
+      var detail = "";
+      try {
+        var body = await resp.json();
+        detail = body && body.detail ? " — " + JSON.stringify(body.detail) : "";
+      } catch (e) {
+        /* non-JSON error body */
+      }
+      throw new Error(url + " failed (" + resp.status + ")" + detail);
     }
-    render(await resp.json());
-  } catch (err) {
-    message.textContent = err.message;
-    message.className = "error";
+    return resp.json();
   }
-}
 
-document.getElementById("load").addEventListener("click", loadReview);
-loadReview();
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // -- catalog grid ----------------------------------------------------------
+
+  function renderCards() {
+    var grid = $("catalog-grid");
+    if (!state.entries.length) {
+      var empty = el("p", "empty", "No catalog entries.");
+      grid.replaceChildren(empty);
+      return;
+    }
+    var cards = state.entries.map(function (entry) {
+      var decision = state.decisions[entry.asset_id] || "pending";
+      var card = el("button", "card");
+      card.type = "button";
+      card.setAttribute("tabindex", "0");
+      card.setAttribute(
+        "aria-pressed",
+        state.selected && state.selected.asset_id === entry.asset_id ? "true" : "false"
+      );
+
+      var name = el("span", "card-name", entry.asset_id);
+      var decisionBadge = el("span", "decision " + decision, decision);
+      var sha = el("span", "card-sub", "sha " + (entry.sha256 || "").slice(0, 10) + "…");
+      var score = el(
+        "span",
+        "card-score",
+        entry.quality_score != null ? "quality " + Number(entry.quality_score).toFixed(2) : ""
+      );
+
+      card.append(decisionBadge, name, sha);
+      if (score.textContent) card.append(score);
+
+      card.addEventListener("click", function () {
+        select(entry);
+      });
+      card.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          select(entry);
+        }
+      });
+      if (state.selected && state.selected.asset_id === entry.asset_id) {
+        card.classList.add("selected");
+      }
+      return card;
+    });
+    grid.replaceChildren.apply(grid, cards);
+  }
+
+  function select(entry) {
+    state.selected = entry;
+    state.lastRender = null;
+    $("validate").disabled = true;
+    renderCards();
+    renderDetails();
+    $("details").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // -- details panel ---------------------------------------------------------
+
+  function renderDetails() {
+    var entry = state.selected;
+    $("empty-details").hidden = true;
+    $("detail-body").hidden = false;
+
+    var title = entry.asset_id;
+    if (entry.revision) title += " (r" + entry.revision + ")";
+    $("detail-title").textContent = title;
+
+    var decision = state.decisions[entry.asset_id] || "pending";
+    var badge = $("detail-decision");
+    badge.className = "decision " + decision;
+    badge.textContent = decision;
+
+    var meta = $("detail-meta");
+    var pairs = [
+      ["sha256", entry.sha256 || "—"],
+      ["quality", entry.quality_score != null ? Number(entry.quality_score).toFixed(2) : "—"],
+      ["reason", entry.quality_reason || "—"],
+      ["cluster", entry.cluster_id || "—"],
+      ["created", entry.created_at || "—"],
+    ];
+    meta.replaceChildren.apply(
+      meta,
+      pairs.map(function (p) {
+        var div = el("div");
+        div.append(el("dt", null, p[0]), el("dd", null, p[1]));
+        return div;
+      })
+    );
+
+    resetOutputs();
+  }
+
+  function resetOutputs() {
+    $("analysis-summary").textContent = "Not analyzed yet.";
+    $("analysis-summary").className = "muted";
+    $("analysis-body").replaceChildren();
+    $("proposals-summary").textContent = "No proposals yet.";
+    $("proposals-summary").className = "muted";
+    $("proposals-list").replaceChildren();
+    $("render-summary").textContent = "Nothing rendered.";
+    $("render-summary").className = "muted";
+    $("render-body").replaceChildren();
+    $("validate-summary").textContent = "Nothing validated.";
+    $("validate-summary").className = "muted";
+    $("validate-body").replaceChildren();
+  }
+
+  function requireSelection() {
+    if (!state.selected) {
+      throw new Error("Select a catalog entry first.");
+    }
+    return state.selected;
+  }
+
+  function assertOk(data) {
+    if (!data || data.status === "error") {
+      throw new Error("Bad response from server.");
+    }
+  }
+
+  // -- actions ---------------------------------------------------------------
+
+  async function runAction(name, fn, onDone) {
+    var label = name.charAt(0).toUpperCase() + name.slice(1);
+    try {
+      setStatus("Running " + label + "…");
+      var data = await fn();
+      onDone(data);
+      setStatus(label + " complete.");
+      showToast(label + " complete.");
+    } catch (err) {
+      setStatus(label + " failed.", true);
+      showToast(err.message, true);
+    }
+  }
+
+  function bodyFor(extra) {
+    return JSON.stringify(Object.assign({ asset: state.selected.sha256 }, extra));
+  }
+
+  function post(url, body) {
+    return fetchJSON(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: body,
+    });
+  }
+
+  async function analyze() {
+    requireSelection();
+    var profile = $("profile").value;
+    return runAction(
+      "analyze",
+      function () {
+        return post("/api/analyze", bodyFor({ profile: profile }));
+      },
+      renderAnalysis
+    );
+  }
+
+  function fmtMetric(label, value) {
+    var div = el("dl", "metric");
+    div.append(el("dt", null, label + ":"), el("dd", null, String(value)));
+    return div;
+  }
+
+  function renderAnalysis(data) {
+    assertOk(data);
+    var quality = data.quality || {};
+    var summary = $("analysis-summary");
+    summary.className = "";
+    summary.textContent =
+      "Profile " + (data.metadata && data.metadata.profile) + " · asset " +
+      String(data.asset_id).slice(0, 12) + "…";
+
+    var body = $("analysis-body");
+    var metrics = [
+      ["technical", round(quality.technical_quality)],
+      ["aesthetic", round(quality.aesthetic_quality)],
+      ["sharpness", round(quality.sharpness)],
+      ["exposure", round(quality.exposure)],
+      ["contrast", round(quality.contrast)],
+      [
+        "resolution ok",
+        quality.resolution_sufficient ? "yes" : "no",
+      ],
+    ];
+    body.replaceChildren.apply(
+      body,
+      metrics.map(function (m) {
+        return fmtMetric(m[0], m[1]);
+      })
+    );
+  }
+
+  async function propose() {
+    requireSelection();
+    var target = $("target").value;
+    return runAction(
+      "propose",
+      function () {
+        return post("/api/propose", bodyFor({ target: target }));
+      },
+      renderProposals
+    );
+  }
+
+  function round(n) {
+    return n === undefined || n === null ? "—" : Number(n).toFixed(3);
+  }
+
+  function renderProposals(data) {
+    assertOk(data);
+    var proposals = Array.isArray(data) ? data : [];
+    var summary = $("proposals-summary");
+    if (!proposals.length) {
+      summary.className = "muted";
+      summary.textContent = "No treatments proposed.";
+      return;
+    }
+    summary.className = "";
+    summary.textContent = proposals.length + " treatment(s) proposed.";
+
+    var list = $("proposals-list");
+    var items = proposals.map(function (p) {
+      var li = el("li");
+      var head = el("div");
+      var treatment = el("span", "treatment", p.treatment);
+      var scoreSpan = el(
+        "span",
+        "score",
+        " — score " + round(p.score) + (p.evidence ? " · " + String(p.evidence).slice(0, 60) : "")
+      );
+      head.append(treatment, scoreSpan);
+      li.append(head);
+
+      if (Array.isArray(p.rationale) && p.rationale.length) {
+        var ul = el("ul");
+        ul.append.apply(
+          ul,
+          p.rationale.map(function (r) {
+            return el("li", null, String(r));
+          })
+        );
+        li.append(ul);
+      }
+      return li;
+    });
+    list.replaceChildren.apply(list, items);
+  }
+
+  async function renderTo(targetName) {
+    requireSelection();
+    return runAction(
+      "render " + targetName,
+      function () {
+        return post("/api/render", bodyFor({ target: targetName }));
+      },
+      function (data) {
+        renderRenderResult(data, targetName);
+      }
+    );
+  }
+
+  function renderRenderResult(data, targetName) {
+    assertOk(data);
+    state.lastRender = { sha: data.sha256, target: targetName, size: data.size_bytes };
+    $("validate").disabled = false;
+
+    var summary = $("render-summary");
+    summary.className = "";
+    summary.textContent =
+      "Rendered " + data.treatment + " → " + data.target_width + "×" + data.target_height +
+      (data.upscaled_warning ? " (UPSCALED — review quality)" : "");
+
+    var body = $("render-body");
+    var rows = [
+      ["target", data.target_width + "×" + data.target_height],
+      ["treatment", data.treatment],
+      ["sha256", data.sha256],
+      ["size", humanBytes(data.size_bytes)],
+      ["renderer", data.renderer_version],
+    ];
+    if (data.notes && data.notes.length) {
+      rows.push(["notes", data.notes.join("; ")]);
+    }
+    var grid = el("div", "render-result");
+    grid.append.apply(
+      grid,
+      rows.map(function (r) {
+        var div = el("div");
+        div.append(el("span", "muted", r[0] + ": "), el("span", null, r[1]));
+        return div;
+      })
+    );
+    body.replaceChildren(grid);
+  }
+
+  async function validate() {
+    requireSelection();
+    if (!state.lastRender) {
+      setStatus("Render an artifact first.", true);
+      return;
+    }
+    var r = state.lastRender;
+    return runAction(
+      "validate",
+      function () {
+        return post("/api/validate", JSON.stringify({
+          artifact_sha: r.sha,
+          expected_sha: r.sha,
+          target: r.target,
+        }));
+      },
+      renderValidation
+    );
+  }
+
+  function renderValidation(data) {
+    assertOk(data);
+    var summary = $("validate-summary");
+    summary.className = "";
+    summary.textContent =
+      (data.publishable ? "Publishable." : "NOT publishable.") +
+      " valid=" + (data.valid ? "yes" : "no");
+
+    var body = $("validate-body");
+    var checks = (data.checks || []).map(function (check) {
+      var div = el("div", "check " + (check.passed ? "pass" : "fail"));
+      var mark = el("span", "mark", check.passed ? "✓" : "✗");
+      var name = el("span", "name", check.name);
+      div.append(mark, name);
+      if (check.reason) {
+        var reason = el("span", "muted", " — " + check.reason);
+        div.append(reason);
+      }
+      return div;
+    });
+    var report = el("div", "validate-report");
+    report.append.apply(report, checks);
+    body.replaceChildren(report);
+  }
+
+  function reviewAction(action) {
+    return function () {
+      if (!state.selected) {
+        setStatus("Select a catalog entry first.", true);
+        return;
+      }
+      var assetId = state.selected.asset_id;
+      return runAction(
+        action,
+        function () {
+          return post("/api/review/" + action, JSON.stringify({ asset: assetId }));
+        },
+        function (data) {
+          state.decisions[assetId] = data.decision || "pending";
+          renderCards();
+          renderDetails();
+        }
+      );
+    };
+  }
+
+  function humanBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+
+  // -- boot ------------------------------------------------------------------
+
+  async function loadCatalog() {
+    setStatus("Loading catalog…");
+    try {
+      var entries = await fetchJSON("/catalog");
+      var review = await fetchJSON("/api/review");
+      state.entries = entries;
+      state.decisions = {};
+      review.forEach(function (r) {
+        state.decisions[r.asset_id] = r.decision || "pending";
+      });
+      renderCards();
+      setStatus(entries.length + " catalog entr" + (entries.length === 1 ? "y" : "ies") + ".");
+    } catch (err) {
+      setStatus("Failed to load catalog.", true);
+      showToast(err.message, true);
+    }
+  }
+
+  $("analyze").addEventListener("click", analyze);
+  $("propose").addEventListener("click", propose);
+  $("render-1080p").addEventListener("click", function () {
+    renderTo("1080p");
+  });
+  $("render-4k").addEventListener("click", function () {
+    renderTo("4k");
+  });
+  $("validate").addEventListener("click", validate);
+  $("approve").addEventListener("click", reviewAction("approve"));
+  $("reject").addEventListener("click", reviewAction("reject"));
+  $("undo").addEventListener("click", reviewAction("undo"));
+
+  loadCatalog();
+})();

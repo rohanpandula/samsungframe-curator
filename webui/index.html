@@ -3,30 +3,98 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Curator Review</title>
+  <title>Darkroom Bench</title>
   <link rel="stylesheet" href="/app/styles.css">
 </head>
 <body>
+  <a class="skip-link" href="#main">Skip to catalog</a>
   <header>
-    <h1>Curator Review</h1>
+    <div class="brand">
+      <h1>Darkroom Bench</h1>
+      <p id="status" role="status" aria-live="polite" class="status-text">Loading catalog…</p>
+    </div>
+    <div class="target-select">
+      <label for="target">Output target</label>
+      <select id="target" name="target">
+        <option value="1080p">1080p (1920×1080)</option>
+        <option value="4k">4K (3840×2160)</option>
+      </select>
+    </div>
+    <nav aria-label="Sections">
+      <a href="#catalog">Catalog</a>
+      <a href="#details">Details</a>
+    </nav>
   </header>
-  <main>
-    <section id="review">
-      <h2>Approval queue</h2>
-      <p class="controls">
-        <label for="status">Decision</label>
-        <select id="status" name="status">
-          <option value="">all</option>
-          <option value="pending">pending</option>
-          <option value="approved">approved</option>
-          <option value="rejected">rejected</option>
-        </select>
-        <button id="load" type="button">Load review</button>
-      </p>
-      <p id="message" role="status" aria-live="polite"></p>
-      <ul id="candidates"></ul>
+
+  <main id="main">
+    <section id="catalog" aria-label="Catalog" class="catalog">
+      <h2>Catalog</h2>
+      <div id="catalog-grid" class="catalog-grid"></div>
     </section>
+
+    <aside id="details" class="details" aria-label="Entry details" aria-live="polite">
+      <h2>Details</h2>
+      <div id="empty-details" class="empty">
+        <p>Select a catalog entry to inspect it.</p>
+      </div>
+
+      <div id="detail-body" hidden>
+        <header class="detail-header">
+          <h3 id="detail-title">—</h3>
+          <span id="detail-decision" class="decision pending">pending</span>
+        </header>
+        <dl class="meta" id="detail-meta"></dl>
+
+        <section class="panel" aria-labelledby="analysis-heading">
+          <h3 id="analysis-heading">Analysis</h3>
+          <p id="analysis-summary" class="muted">Not analyzed yet.</p>
+          <div id="analysis-body"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="proposals-heading">
+          <h3 id="proposals-heading">Proposals</h3>
+          <p id="proposals-summary" class="muted">No proposals yet.</p>
+          <ol id="proposals-list"></ol>
+        </section>
+
+        <section class="panel" aria-labelledby="render-heading">
+          <h3 id="render-heading">Render</h3>
+          <p id="render-summary" class="muted">Nothing rendered.</p>
+          <div id="render-body"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="validate-heading">
+          <h3 id="validate-heading">Validation</h3>
+          <p id="validate-summary" class="muted">Nothing validated.</p>
+          <div id="validate-body"></div>
+        </section>
+
+        <section class="panel actions" aria-label="Actions">
+          <h3>Actions</h3>
+          <div class="action-row">
+            <label for="profile">Profile</label>
+            <select id="profile" name="profile">
+              <option value="balanced">balanced</option>
+              <option value="quality">quality</option>
+              <option value="aesthetic">aesthetic</option>
+            </select>
+          </div>
+          <div class="action-row action-buttons">
+            <button type="button" id="analyze" class="btn primary">Analyze</button>
+            <button type="button" id="propose" class="btn primary">Propose</button>
+            <button type="button" id="render-1080p" class="btn">Render 1080p</button>
+            <button type="button" id="render-4k" class="btn">Render 4K</button>
+            <button type="button" id="validate" class="btn" disabled>Validate</button>
+            <button type="button" id="approve" class="btn approve">Approve</button>
+            <button type="button" id="reject" class="btn reject">Reject</button>
+            <button type="button" id="undo" class="btn">Undo</button>
+          </div>
+        </section>
+      </div>
+    </aside>
   </main>
+
+  <div id="message" class="toast" role="alert" aria-live="assertive"></div>
   <script src="/app/app.js"></script>
 </body>
 </html>

@@ -55,7 +55,7 @@ def test_webui_root_serves_spa(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/html")
-    assert "Curator Review" in resp.text
+    assert "Darkroom Bench" in resp.text
 
 
 def test_webui_app_mount_serves_html(client):
@@ -64,7 +64,39 @@ def test_webui_app_mount_serves_html(client):
         resp = client.get(path)
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/html")
-        assert "Curator Review" in resp.text
+        assert "Darkroom Bench" in resp.text
+
+
+def test_webui_smoke_markup_has_catalog_actions_and_scripts(client):
+    """The served SPA shell has the catalog grid + action buttons and loads app.js.
+
+    This is the S02 smoke gate: the catalog region id, the bench action labels,
+    accessible landmark hints, and the bootstrap script reference must all be
+    present in the served index.html.
+    """
+    resp = client.get("/")
+    text = resp.text
+
+    assert 'id="catalog"' in text
+    assert 'id="catalog-grid"' in text
+    assert 'aria-label="Catalog"' in text
+
+    for label in (
+        "Analyze",
+        "Propose",
+        "Render 1080p",
+        "Render 4K",
+        "Validate",
+        "Approve",
+        "Reject",
+        "Undo",
+    ):
+        assert label in text
+
+    assert '<script src="/app/app.js">' in text
+    assert 'href="/app/styles.css"' in text
+    assert 'aria-live="polite"' in text
+    assert 'aria-live="assertive"' in text
 
 
 def test_webui_static_assets_served(client):
