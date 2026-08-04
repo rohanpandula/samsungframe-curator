@@ -11,7 +11,7 @@ test:
 # lifecycle. Fails non-zero on any regression across ingest / analyize / propose /
 # manifest; later scenarios (scan/exit-codes, consolidation) are appended here.
 acceptance:
-	uv run pytest tests/test_acceptance.py tests/test_connector_contract.py tests/test_acceptance_analysis.py -q
+	uv run pytest tests/test_acceptance.py tests/test_connector_contract.py tests/test_acceptance_analysis.py tests/test_acceptance_render.py -q
 
 lint:
 	uv run ruff check .

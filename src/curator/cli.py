@@ -14,6 +14,12 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                and print a human-readable report of unique clusters, exact/
                                near families, best-original flags with phash distances, and
                                the explicit-unsupported (RAW) / corrupt failure surfaces.
+- ``curator render SOURCE``   — render an art-direction manifest (``.json``) or a media
+                               asset to a target (named ``1080p``/``4k`` or ``WxH``) via the
+                               deterministic renderer, printing a summary or ``--json`` result.
+- ``curator validate FILE``   — gate a rendered artifact against expected provenance
+                               (``--expected-sha`` + ``--target`` dims); exit 0 publishable /
+                               1 not / 2 on read or parse error.
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -33,7 +39,13 @@ from curator.analysis.local import LocalAnalysisProvider
 from curator.analysis.pipeline import AnalysisAsset, AnalysisPipeline
 from curator.analysis.profiles import AnalysisProfile
 from curator.analysis.schema import AnalysisResult
-from curator.artdirection.manifest import MANIFEST_VERSION, ArtDirectionManifest
+from curator.approve import ApprovalService
+from curator.artdirection.manifest import (
+    MANIFEST_VERSION,
+    ArtDirectionManifest,
+    LayoutTreatment,
+    SourceRegion,
+)
 from curator.artdirection.policy import (
     ArtDirectionRequest,
     TreatmentProposal,
@@ -45,9 +57,13 @@ from curator.artdirection.policy import (
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.consolidate import ConsolidationExecutor, ConsolidationPlan, build_plan
+from curator.content_store import ContentStore
 from curator.errors import CuratorError
+from curator.hashing import sha256_hex
 from curator.ingest.pipeline import IngestPipeline
 from curator.ingest.report import IngestReport
+from curator.render.renderer import DeterministicRenderer, RenderError, RenderResult
+from curator.render.validate import ArtifactValidator, ValidationReport
 from curator.scan import ScanDiff, scan_connector
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
@@ -203,6 +219,79 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit the manifest as structured JSON",
     )
+
+    render = sub.add_parser(
+        "render",
+        help="render an art-direction manifest (.json) or a media asset to a target",
+    )
+    render.add_argument(
+        "source", help="path to an art-direction manifest (.json) or a media asset"
+    )
+    render.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help="render target: a named target (1080p/4k) or WxH dims "
+        f"(default: {DEFAULT_TARGET})",
+    )
+    render.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the RenderResult as structured JSON",
+    )
+
+    validate = sub.add_parser(
+        "validate",
+        help="validate a rendered artifact against expected provenance",
+    )
+    validate.add_argument("file", help="path to the rendered artifact file")
+    validate.add_argument(
+        "--expected-sha",
+        required=True,
+        help="expected SHA-256 of the artifact bytes",
+    )
+    validate.add_argument(
+        "--target",
+        required=True,
+        help="expected target dims (named 1080p/4k or WxH)",
+    )
+    validate.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the ValidationReport as structured JSON",
+    )
+
+    review = sub.add_parser(
+        "review",
+        help="review catalog approval state (list / approve / reject / undo)",
+    )
+    review.add_argument(
+        "--status",
+        choices=("approved", "rejected", "pending"),
+        help="only list entries whose state matches (default: all)",
+    )
+    review.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the review list as a JSON array",
+    )
+    review_sub = review.add_subparsers(dest="review_command")
+    review_sub.add_parser("list", help="list catalog entries with their approval state")
+
+    for verb in ("approve", "reject"):
+        act = review_sub.add_parser(verb, help=f"{verb} a cataloged asset (or --batch of them)")
+        act.add_argument("asset", nargs="?", help="path to the cataloged asset")
+        act.add_argument(
+            "--batch",
+            help="comma-separated cataloged asset paths to act on",
+        )
+        act.add_argument(
+            "--rationale",
+            default="",
+            help="rationale recorded with the decision",
+        )
+
+    undo = review_sub.add_parser("undo", help="revert the latest decision on an asset")
+    undo.add_argument("asset", help="path to the cataloged asset")
 
     return parser
 
@@ -808,6 +897,229 @@ def _format_manifest(manifest: ArtDirectionManifest) -> str:
     return "\n".join(lines)
 
 
+def _render_target_dims(target: str) -> tuple[int, int]:
+    """Return ``(width, height)`` for a named target or an explicit ``WxH`` string.
+
+    Resolves the known named targets (``1080p``/``4k``) first, then falls back to
+    parsing a ``WxH`` pair. Raises :class:`CuratorError` for anything else so the
+    CLI surfaces a fatal (exit 2) rather than silently guessing.
+    """
+    named = _TARGET_SPECS.get(target)
+    if named is not None:
+        return named
+    if "x" in target:
+        try:
+            w_str, h_str = target.split("x", 1)
+            width, height = int(w_str), int(h_str)
+            if width > 0 and height > 0:
+                return width, height
+        except ValueError:
+            pass
+    raise CuratorError(
+        f"unknown target {target!r} (use a named target or WxH dimensions)"
+    )
+
+
+def _render(args: argparse.Namespace) -> int:
+    """Render *args.source* to *args.target*; print a summary or ``--json`` result.
+
+    A ``.json`` source is loaded via :class:`ArtDirectionManifest` (resolved for
+    *args.target*) with every referenced source sha fetched from the
+    :class:`ContentStore`; any other source is treated as a media asset and
+    rendered through a deterministic single-full-bleed manifest built from its
+    bytes. Maps ``--target`` to pixel dims, renders via
+    :class:`DeterministicRenderer`, and returns :data:`EXIT_OK` (0). An unapproved
+    upscale raises :class:`RenderError` (R008), which is reported to stderr and
+    returned as :data:`EXIT_FATAL` (2).
+    """
+    path = Path(args.source).resolve()
+    if not path.is_file():
+        raise CuratorError(f"render source is not a file: {args.source!r}")
+    width, height = _render_target_dims(args.target)
+    if path.suffix.lower() == ".json":
+        try:
+            manifest = ArtDirectionManifest.from_dict(
+                json.loads(path.read_text(encoding="utf-8"))
+            ).resolved_for(args.target)
+        except (json.JSONDecodeError, CuratorError, OSError) as exc:
+            print(f"curator: error: failed to load manifest {path}: {exc}", file=sys.stderr)
+            return EXIT_FATAL
+        sources = {sha: ContentStore().get(sha) for sha in manifest.sources}
+    else:
+        data = path.read_bytes()
+        sha = sha256_hex(data)
+        manifest = ArtDirectionManifest(
+            sources=[sha],
+            regions=[SourceRegion(source_sha256=sha)],
+            layout_treatment=LayoutTreatment.SINGLE_FULLBLEED,
+        )
+        sources = {sha: data}
+    renderer = DeterministicRenderer()
+    try:
+        result = renderer.render(manifest, sources, (width, height))
+    except RenderError as exc:
+        print(f"curator: error: {exc}", file=sys.stderr)
+        return EXIT_FATAL
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(_format_render(result))
+    return EXIT_OK
+
+
+def _format_render(result: RenderResult) -> str:
+    """Render a :class:`RenderResult` as a human-readable summary."""
+    return "\n".join(
+        [
+            f"render {result.target_width}x{result.target_height}",
+            f"  treatment : {result.treatment}",
+            f"  sha256    : {result.sha256}",
+            f"  size      : {result.size_bytes} bytes",
+            f"  profile   : {result.color_profile} ({result.color_mode})",
+            f"  sources   : {', '.join(result.sources)}",
+            f"  upscaled  : {result.upscaled_warning}",
+        ]
+    )
+
+
+def _validate(args: argparse.Namespace) -> int:
+    """Gate a rendered artifact against expected provenance (dimensions + SHA-256).
+
+    Reads *args.file*'s bytes and runs :class:`ArtifactValidator` against the
+    expected SHA-256 and parsed ``--target`` dims. Prints a human-readable summary
+    (publishable flag plus every failing check's reason) or the
+    :class:`ValidationReport` as JSON. Returns :data:`EXIT_OK` (0) when
+    publishable, :data:`EXIT_PARTIAL` (1) otherwise, and :data:`EXIT_FATAL` (2)
+    on a read or target parse error.
+    """
+    path = Path(args.file).resolve()
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        print(f"curator: error: {exc}", file=sys.stderr)
+        return EXIT_FATAL
+    try:
+        width, height = _render_target_dims(args.target)
+    except CuratorError as exc:
+        print(f"curator: error: {exc}", file=sys.stderr)
+        return EXIT_FATAL
+    report = ArtifactValidator().validate(data, args.expected_sha, (width, height))
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(_format_validate(report))
+    return EXIT_OK if report.publishable else EXIT_PARTIAL
+
+
+def _format_validate(report: ValidationReport) -> str:
+    """Render a :class:`ValidationReport` as a human-readable summary."""
+    lines = [f"validate  publishable : {str(report.publishable).lower()}"]
+    failed = [c for c in report.checks if not c.passed]
+    if failed:
+        lines.append("  failing checks:")
+        for check in failed:
+            lines.append(f"    - {check.name}: {check.reason}")
+    return "\n".join(lines)
+
+
+def _review(args: argparse.Namespace) -> int:
+    """Run the review surface: list approval state, or apply a decision.
+
+    With no subcommand (or ``list``), lists every catalog entry with its current
+    ApprovalService state (optionally filtered by ``--status``). The
+    ``approve``/``reject``/``undo`` subcommands resolve each asset to its catalog
+    entry (LocalConnector semantics) and record the transition, printing a
+    confirmation. Unknown assets raise :class:`CatalogEntryNotFound` (mapped to a
+    fatal exit 2 by ``main``).
+    """
+    catalog = Catalog()
+    try:
+        if args.review_command in ("approve", "reject", "undo"):
+            return _review_update(args, catalog)
+        return _review_list(args, catalog)
+    finally:
+        catalog.db.close()
+
+
+def _review_resolve(catalog: Catalog, asset: str) -> int:
+    """Return the catalog entry id for *asset* (LocalConnector semantics).
+
+    The asset's parent folder supplies the connector id matching ingest, exactly
+    as ``propose``/``manifest`` do via :func:`_resolve_asset`.
+    """
+    path = Path(asset).resolve()
+    connector = LocalConnector(path.parent)
+    return resolve_catalog_entry(catalog, connector.connector_id, str(path))
+
+
+def _review_list(args: argparse.Namespace, catalog: Catalog) -> int:
+    """List catalog entries with their current approval state (filterable)."""
+    approval = ApprovalService(catalog)
+    rows: list[dict] = []
+    for entry in catalog.list_entries():
+        current = approval.current(entry["id"])
+        decision = current.decision.value.lower() if current else None
+        rows.append(
+            {
+                "asset_id": entry["asset_id"],
+                "entry_id": entry["id"],
+                "decision": decision,
+            }
+        )
+    if args.status:
+        status = args.status
+        rows = [
+            r for r in rows
+            if (r["decision"] is None if status == "pending" else r["decision"] == status)
+        ]
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+    else:
+        if not rows:
+            print("review: no catalog entries")
+        else:
+            print("review")
+            for r in rows:
+                print(
+                    f"  {Path(r['asset_id']).name}  {r['decision'] or 'pending'}"
+                    f"  (entry {r['entry_id']})"
+                )
+    return EXIT_OK
+
+
+def _review_update(args: argparse.Namespace, catalog: Catalog) -> int:
+    """Apply an approve/reject/undo (or --batch) decision and confirm it."""
+    approval = ApprovalService(catalog)
+    if args.review_command == "undo":
+        performed = [(args.asset, _review_resolve(catalog, args.asset))]
+        approval.undo(performed[0][1])
+    elif args.batch:
+        assets = [a.strip() for a in args.batch.split(",") if a.strip()]
+        if not assets:
+            raise CuratorError(f"review {args.review_command}: --batch provided no assets")
+        performed = [(a, _review_resolve(catalog, a)) for a in assets]
+        if args.review_command == "approve":
+            approval.batch_approve([eid for _, eid in performed], args.rationale)
+        else:
+            for _a, eid in performed:
+                approval.reject(eid, args.rationale)
+    else:
+        if not args.asset:
+            raise CuratorError(
+                f"review {args.review_command}: no asset — pass <asset> or --batch"
+            )
+        performed = [(args.asset, _review_resolve(catalog, args.asset))]
+        if args.review_command == "approve":
+            approval.approve(performed[0][1], args.rationale)
+        else:
+            approval.reject(performed[0][1], args.rationale)
+    for asset, entry_id in performed:
+        event = approval.current(entry_id)
+        state = event.decision.value.lower() if event else "pending"
+        print(f"review {args.review_command}: {Path(asset).name} (entry {entry_id}) -> {state}")
+    return EXIT_OK
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Route parsed args to the matching subcommand handler."""
     if args.command == "catalog":
@@ -833,6 +1145,12 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _propose(args)
     if args.command == "manifest":
         return _manifest(args)
+    if args.command == "render":
+        return _render(args)
+    if args.command == "validate":
+        return _validate(args)
+    if args.command == "review":
+        return _review(args)
     # Unreachable given required subparsers; defensive fallback.
     return EXIT_FATAL
 
