@@ -97,6 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit structured JSON instead of a human-readable report",
     )
 
+    health = sub.add_parser("health", help="report catalog health (exit 0)")
+    health.add_argument(
+        "--json",
+        action="store_true",
+        help="emit structured JSON instead of a human-readable summary",
+    )
+
     return parser
 
 
@@ -242,6 +249,25 @@ def _consolidate_execute(args: argparse.Namespace, source: Path) -> int:
     return 0
 
 
+def _health(args: argparse.Namespace) -> int:
+    """Report catalog health: status plus the total catalog entry count.
+
+    Opens a :class:`Catalog` (auto-migrating, honoring ``CURATOR_DATA_ROOT``)
+    and prints ``{"status": "healthy", "catalog_entries": N}`` when ``--json``
+    is given, else a small human-readable summary. Returns 0 on success.
+    """
+    catalog = Catalog()
+    try:
+        count = catalog.count_catalog_entries()
+    finally:
+        catalog.db.close()
+    if args.json:
+        print(json.dumps({"status": "healthy", "catalog_entries": count}))
+    else:
+        print(f"curator: healthy ({count} catalog entries)")
+    return 0
+
+
 def _format_plan(plan: ConsolidationPlan) -> str:
     """Render a :class:`ConsolidationPlan` as a human-readable dry-run report."""
     counts = plan.group_counts()
@@ -325,6 +351,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _ingest(args.path, resume=args.resume)
     if args.command == "consolidate":
         return _consolidate(args)
+    if args.command == "health":
+        return _health(args)
     # Unreachable given required subparsers; defensive fallback.
     return 2
 

@@ -322,6 +322,16 @@ class Catalog:
             (cluster_id,),
         )
 
+    def count_catalog_entries(self) -> int:
+        """Return the total number of rows in ``catalog_entries``.
+
+        Used by the ``health`` surface (CLI + API) to report the catalog's
+        entry count. Counts every ``catalog_entries`` row regardless of
+        connector or cluster membership.
+        """
+        row = self.db.execute("SELECT COUNT(*) FROM catalog_entries").fetchone()
+        return int(row[0])
+
     def count_unique_clusters(self) -> int:
         """Return the number of distinct non-NULL ``cluster_id`` values.
 
