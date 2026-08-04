@@ -36,7 +36,6 @@ from curator.consolidate import (
 from curator.errors import CuratorError
 from fixture_library import scene_image
 
-
 # ---------------------------------------------------------------------------
 # fixture builder (deterministic, in-process)
 # ---------------------------------------------------------------------------

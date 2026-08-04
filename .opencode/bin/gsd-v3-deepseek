@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+opencode_data_root="${XDG_DATA_HOME:-${HOME}/.local/share}"
+opencode_auth_file="${opencode_data_root}/opencode/auth.json"
+
+if [[ ! -r "${opencode_auth_file}" ]]; then
+  echo "OpenCode credentials were not found at ${opencode_auth_file}." >&2
+  echo "Run 'opencode providers login' and add OpenRouter first." >&2
+  exit 1
+fi
+
+if ! openrouter_key="$(
+  jq -er '.openrouter | select(.type == "api") | .key' \
+    "${opencode_auth_file}"
+)"; then
+  echo "OpenCode does not have a usable OpenRouter credential." >&2
+  echo "Run 'opencode providers login' and add OpenRouter first." >&2
+  exit 1
+fi
+
+export OPENROUTER_API_KEY="${openrouter_key}"
+unset openrouter_key
+
+exec /opt/homebrew/bin/gsd "$@"
