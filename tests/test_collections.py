@@ -214,9 +214,12 @@ def test_schema_v10_tables_and_version(catalog):
     tables = _db.table_names(catalog.db)
     for table in ("playlists", "playlist_members", "rotation_state"):
         assert table in tables
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION == 11
     for table in ("playlists", "playlist_members", "rotation_state"):
         assert table in EXPECTED_TABLES
+    for table in ("immich_sync_state", "immich_asset_state"):
+        assert table in EXPECTED_TABLES
+        assert table in tables
 
 
 def test_dataclass_round_trip(entry_ids):

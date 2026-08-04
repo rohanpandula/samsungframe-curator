@@ -364,6 +364,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_rotation_state_playlist
     ON rotation_state(playlist_id);
 """
 
+# Migration v11 (M005/S05): persists the Immich source connector's sync state so
+# :meth:`~curator.connectors.immich.ImmichConnector.sync` is checkpointed,
+# idempotent, and isolated per connector instance. Two tables, mirroring the
+# v4-v10 posture (plain TEXT/INTEGER columns, INSERT OR IGNORE/upsert friendly):
+#
+# - ``immich_sync_state``   — one row per connector instance holding the single
+#   persisted browse/query **cursor** (a value, not per-asset), so a completed
+#   sync resumes exactly where it left off without re-walking known assets.
+#   Keyed by PRIMARY KEY(connector_id), the per-instance isolation guarantee.
+# - ``immich_asset_state``  — one row per (connector, asset) holding the
+#   last-observed ``revision``/``checksum``/``available``. Rows are **never
+#   deleted**: an asset that disappears flips ``available = 0`` (a tombstone,
+#   mirroring the M001 availability semantics) and stays in the table.
+#
+# These cannot reuse ``source_sync_checkpoints`` (M001): that table is keyed
+# per (connector_id, asset_id) and carries no checksum or availability column,
+# so it cannot hold a single-connector query cursor nor the per-asset
+# download-verify state this connector needs.
+SCHEMA_V11_SQL = """
+CREATE TABLE IF NOT EXISTS immich_sync_state (
+    connector_id TEXT PRIMARY KEY,
+    cursor       TEXT,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS immich_asset_state (
+    connector_id TEXT NOT NULL,
+    asset_id     TEXT NOT NULL,
+    revision     TEXT,
+    checksum     TEXT,
+    available    INTEGER NOT NULL DEFAULT 1,
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (connector_id, asset_id)
+);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -376,6 +412,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (8, SCHEMA_V8_SQL),
     (9, SCHEMA_V9_SQL),
     (10, SCHEMA_V10_SQL),
+    (11, SCHEMA_V11_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -402,4 +439,6 @@ EXPECTED_TABLES: list[str] = [
     "playlists",
     "playlist_members",
     "rotation_state",
+    "immich_sync_state",
+    "immich_asset_state",
 ]
