@@ -311,8 +311,57 @@ CREATE TABLE IF NOT EXISTS watcher_queue (
     processed_at TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_watcher_queue_path
+    CREATE INDEX IF NOT EXISTS idx_watcher_queue_path
     ON watcher_queue(path);
+"""
+
+# Migration v10 (M005/S04): adds the collections/rotation persistence layer. Three
+# append-only/registry tables backing user-defined playlists and their deterministic
+# rotation engine state, mirroring the v4-v9 posture (plain INTEGER FKs with indexes,
+# JSON blobs for per-row config/state, wall-clock ``created_at`` defaults).
+#
+# - ``playlists``       — one row per playlist; ``config_json`` is the full JSON
+#   serialization of :class:`curator.collections.rotation.Playlist` (name apart,
+#   kept as a real column for queryability).
+# - ``playlist_members``— ordered membership: one row per (playlist, catalog_entry)
+#   with an explicit ``position`` so order is preserved and re-shuffled on load.
+# - ``rotation_state``  — one row per playlist holding the latest persisted
+#   :class:`~curator.collections.rotation.RotationState` (``state_json``). A single
+#   row per playlist (via the UNIQUE playlist_id index) is the simplest form that
+#   preserves persistence + round-trip; the engine's own ``history`` list inside the
+#   JSON keeps the explainability trail without an append-only journal.
+SCHEMA_V10_SQL = """
+CREATE TABLE IF NOT EXISTS playlists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    config_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlists_name
+    ON playlists(name);
+
+CREATE TABLE IF NOT EXISTS playlist_members (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id      INTEGER NOT NULL,
+    catalog_entry_id INTEGER NOT NULL,
+    position         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_playlist_members_playlist
+    ON playlist_members(playlist_id);
+
+CREATE TABLE IF NOT EXISTS rotation_state (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER NOT NULL,
+    state_json  TEXT,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- One row per playlist: keeps persistence + round-trip simple and lets the
+-- store upsert the latest state for a playlist without an append-only journal.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_rotation_state_playlist
+    ON rotation_state(playlist_id);
 """
 
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
@@ -326,6 +375,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (7, SCHEMA_V7_SQL),
     (8, SCHEMA_V8_SQL),
     (9, SCHEMA_V9_SQL),
+    (10, SCHEMA_V10_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -349,4 +399,7 @@ EXPECTED_TABLES: list[str] = [
     "renders",
     "dest_journal",
     "watcher_queue",
+    "playlists",
+    "playlist_members",
+    "rotation_state",
 ]
