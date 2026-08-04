@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.rohan.curator</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/curator/.venv/bin/curator</string>
+		<string>--headless</string>
+		<string>start</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/opt/curator</string>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>/opt/curator/logs/curator.out.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>/opt/curator/logs/curator.err.log</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/curator/.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+</dict>
+</plist>

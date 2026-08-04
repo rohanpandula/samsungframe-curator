@@ -29,9 +29,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
+from curator import api as api_module
 from curator import db
 from curator.analysis.cli_utils import resolve_catalog_entry
 from curator.analysis.errors import CatalogEntryNotFound
@@ -292,6 +295,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     undo = review_sub.add_parser("undo", help="revert the latest decision on an asset")
     undo.add_argument("asset", help="path to the cataloged asset")
+
+    headless = sub.add_parser(
+        "headless",
+        help="start the headless server (launchd/Docker packaging entrypoint; "
+        "also reachable as `--headless start`)",
+    )
+    headless.add_argument(
+        "--config",
+        help="path to a JSON config file (data_root / secrets overrides)",
+    )
+    headless_sub = headless.add_subparsers(dest="headless_command", required=True)
+    start = headless_sub.add_parser("start", help="start the headless curator API")
+    start.add_argument(
+        "--accelerator",
+        choices=("cpu", "cuda"),
+        default=None,
+        help="prefer an accelerator (default: CURATOR_ACCELERATOR or cpu)",
+    )
+    start.add_argument(
+        "--check",
+        action="store_true",
+        help="dry run: resolve config, emit status JSON, exit without binding the "
+        "server (deterministic, used by tests and ops preflight)",
+    )
 
     return parser
 
@@ -1151,8 +1178,120 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _validate(args)
     if args.command == "review":
         return _review(args)
+    if args.command == "headless":
+        return _headless_start(args)
     # Unreachable given required subparsers; defensive fallback.
     return EXIT_FATAL
+
+
+def _headless_load_config(config_path: str | None) -> dict:
+    """Load the optional ``--config`` JSON file as a plain dict (stdlib only).
+
+    The file may carry ``data_root`` and ``secrets`` keys. Unknown keys are
+    ignored (mirroring the config module's ``extra="ignore"`` behaviour). A
+    ``data_root`` in the file is a fallback that the environment overrides.
+    """
+    if config_path is None:
+        return {}
+    path = Path(config_path)
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CuratorError(f"failed to read --config {path}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise CuratorError(f"--config {path}: expected a JSON object")
+    return parsed
+
+
+def _headless_resolve_secrets(config: dict) -> dict[str, str]:
+    """Resolve env-backed secret references (``*_TOKEN`` / ``*_API_KEY``).
+
+    Explicit environment variables take precedence over values in the config
+    file, matching the config module's env-over-config ordering. Only the
+    presence of at least one secret is validated; values are never echoed.
+    """
+    secrets: dict[str, str] = dict(config.get("secrets", {}) or {})
+    for key, value in os.environ.items():
+        if key.endswith("_TOKEN") or key.endswith("_API_KEY"):
+            secrets[key] = value
+    return secrets
+
+
+def _accelerator_available(name: str) -> bool:
+    """Return whether the requested *name* accelerator is usable here.
+
+    ``cuda`` is considered available only when the ``nvidia-smi`` driver tool is
+    on PATH. ``cpu`` is always available. This is a conservative, side-effect-free
+    probe so the headless start can degrade gracefully without probing GPU libs.
+    """
+    if name == "cuda":
+        return shutil.which("nvidia-smi") is not None
+    return True
+
+
+def _headless_start(args: argparse.Namespace) -> int:
+    """Resolve config and start (``--check`` preflight or live) the headless API.
+
+    Configuration is resolved from an optional ``--config`` JSON file and/or the
+    ``CURATOR_*`` environment plus ``*_TOKEN`` / ``*_API_KEY`` env-backed secret
+    references, without any prompting. Required configuration is validated:
+    ``data_root`` must resolve and at least one secret must be configured.
+
+    ``--check`` (documented dry path) resolves configuration, emits the
+    machine-readable JSON status, and returns without binding a server — keeping
+    tests and ops preflight deterministic. Without ``--check`` the API is served
+    (uvicorn, loopback-only) via :func:`curator.api.create_app`.
+
+    When a CUDA accelerator is requested but unavailable, the service degrades to
+    CPU (which remains functional): a clear actionable warning is emitted and the
+    status reports ``"cpu (fallback)"`` rather than failing silently.
+
+    Returns :data:`EXIT_OK` (0) when ready, :data:`EXIT_FATAL` (2) on invalid or
+    missing required configuration.
+    """
+    config = _headless_load_config(args.config)
+    data_root = (
+        os.environ.get("CURATOR_DATA_ROOT")
+        or (str(config["data_root"]) if "data_root" in config else None)
+        or str(Path.home() / ".curator")
+    )
+    secrets = _headless_resolve_secrets(config)
+    api = f"http://{api_module.HOST}:{api_module.PORT}"
+
+    if not secrets:
+        print(
+            "curator: error: headless start requires at least one secret — set a "
+            "*_TOKEN or *_API_KEY environment variable (or a 'secrets' map in --config)",
+            file=sys.stderr,
+        )
+        return EXIT_FATAL
+
+    requested = args.accelerator or os.environ.get("CURATOR_ACCELERATOR") or "cpu"
+    ready = True
+    if requested != "cpu" and not _accelerator_available(requested):
+        print(
+            f"curator: warning: accelerator {requested!r} requested but unavailable; "
+            "degrading to CPU — CPU remains fully functional",
+            file=sys.stderr,
+        )
+        requested = "cpu (fallback)"
+
+    status = {
+        "status": "ok",
+        "data_root": data_root,
+        "api": api,
+        "ready": ready,
+        "accelerator": requested,
+    }
+    print(json.dumps(status, ensure_ascii=False))
+
+    if args.check:
+        return EXIT_OK
+
+    import uvicorn
+
+    uvicorn.run(api_module.create_app(), host=api_module.HOST, port=api_module.PORT)
+    return EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1163,6 +1302,8 @@ def main(argv: list[str] | None = None) -> int:
     returned code.
     """
     parser = build_parser()
+    if argv and argv[0] == "--headless":
+        argv = ["headless", *argv[1:]]
     args = parser.parse_args(argv)
     try:
         return _dispatch(args)

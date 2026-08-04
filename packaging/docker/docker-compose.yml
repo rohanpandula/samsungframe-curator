@@ -1,0 +1,21 @@
+# CURATOR CPU compose profile — loopback-bound headless API.
+# Usage:  docker compose -f packaging/docker/docker-compose.yml up -d --build
+services:
+  curator:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    image: curator:cpu
+    container_name: curator
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    env_file:
+      - .curator.env
+    environment:
+      CURATOR_DATA_ROOT: /data
+    volumes:
+      - curator-data:/data
+
+volumes:
+  curator-data:
