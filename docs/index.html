@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<meta name="description" content="SamsungFrame Curator — a private, offline-first studio that consolidates, curates, analyzes, renders, and safely publishes your photo library to a Samsung Frame." />
+<title>SamsungFrame Curator — your photos, curated for the Frame</title>
+<style>
+  :root {
+    --bg: #0c0c0e;
+    --bg-2: #131316;
+    --bg-3: #1a1a1e;
+    --line: #26262b;
+    --text: #e9e9ec;
+    --text-dim: #9b9ba3;
+    --text-faint: #6d6d75;
+    --accent: #e6a15a;
+    --accent-dim: rgba(230,161,90,.12);
+    --radius: 14px;
+    --font-sans: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", "Fira Code", Menlo, monospace;
+    --pad: clamp(20px, 5vw, 72px);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ::selection { background: var(--accent-dim); color: var(--text); }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 var(--pad); }
+
+  /* ---------- nav ---------- */
+  nav.nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(12,12,14,.82);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav-inner {
+    display: flex; align-items: center; justify-content: space-between;
+    height: 60px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: -.01em; }
+  .brand .mark {
+    width: 22px; height: 22px; border: 1.5px solid var(--accent); border-radius: 5px;
+    display: grid; place-items: center; font-family: var(--font-mono); font-size: 11px; color: var(--accent);
+  }
+  .nav-links { display: flex; align-items: center; gap: 22px; font-size: 14px; color: var(--text-dim); }
+  .nav-links a { color: inherit; }
+  .nav-links a:hover { color: var(--text); text-decoration: none; }
+  .nav-cta { font-size: 13px; }
+
+  /* ---------- hero ---------- */
+  header.hero { padding: clamp(48px, 9vh, 96px) 0 clamp(40px, 7vh, 72px); }
+  .hero-inner { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(0,.85fr); gap: clamp(24px,4vw,56px); align-items: center; }
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--accent);
+    margin: 0 0 18px;
+  }
+  h1 {
+    margin: 0 0 20px;
+    font-size: clamp(34px, 5.4vw, 62px);
+    line-height: 1.02;
+    letter-spacing: -.03em;
+    font-weight: 700;
+    max-width: 13ch;
+  }
+  h1 .em { color: var(--accent); font-style: italic; font-weight: 700; padding-bottom: 2px; }
+  .lede { margin: 0 0 26px; font-size: clamp(16px, 1.9vw, 19px); color: var(--text-dim); max-width: 46ch; }
+  .cta-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    border-radius: 999px; padding: 11px 20px; font-weight: 600; font-size: 15px;
+    transition: transform .18s cubic-bezier(.16,1,.3,1), opacity .18s;
+    white-space: nowrap;
+  }
+  .btn:hover { text-decoration: none; }
+  .btn:active { transform: translateY(1px) scale(.985); }
+  .btn-primary { background: var(--accent); color: #160f06; }
+  .btn-primary:hover { opacity: .92; }
+  .btn-ghost { border: 1px solid var(--line); color: var(--text); }
+  .btn-ghost:hover { border-color: var(--text-faint); background: var(--bg-2); }
+
+  .hero-badge {
+    border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2);
+    padding: 18px 20px; font-family: var(--font-mono); font-size: 13px; color: var(--text-dim);
+  }
+  .hero-badge .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  .hero-badge .row:last-child { border-bottom: 0; }
+  .hero-badge .k { color: var(--text-faint); }
+  .hero-badge .v { color: var(--text); }
+
+  /* ---------- metric strip ---------- */
+  .metrics { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .metrics .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); }
+  .metric { background: var(--bg); padding: 22px 0; display: flex; flex-direction: column; }
+  .metric b { font-size: clamp(22px, 3vw, 30px); letter-spacing: -.02em; }
+  .metric b .n { color: var(--accent); }
+  .metric span { font-size: 12px; color: var(--text-faint); margin-top: 4px; }
+
+  /* ---------- sections ---------- */
+  section.block { padding: clamp(56px, 9vw, 104px) 0; }
+  h2.sec {
+    margin: 0 0 12px; font-size: clamp(26px, 3.6vw, 42px); letter-spacing: -.02em; line-height: 1.1; font-weight: 700;
+  }
+  .sub { margin: 0 0 40px; color: var(--text-dim); max-width: 58ch; font-size: 16px; }
+
+  /* ---------- workflow pipeline ---------- */
+  .pipe { display: grid; gap: 12px; }
+  .step {
+    display: grid; grid-template-columns: 90px minmax(0,1fr) 70px; gap: 20px; align-items: start;
+    border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2);
+    padding: 20px 22px;
+  }
+  .step .num { font-family: var(--font-mono); color: var(--accent); font-size: 13px; padding-top: 4px; }
+  .step h3 { margin: 0 0 6px; font-size: 18px; letter-spacing: -.01em; }
+  .step p { margin: 0; color: var(--text-dim); font-size: 14.5px; }
+  .step .tag { align-self: center; font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); text-align: right; }
+
+  /* ---------- capabilities bento ---------- */
+  .bento { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .tile { border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); padding: 22px; }
+  .tile.high { background: linear-gradient(160deg, #1d1a15 0%, var(--bg-2) 60%); }
+  .tile .badge { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); display: block; margin-bottom: 12px; }
+  .tile h3 { margin: 0 0 8px; font-size: 17px; }
+  .tile p { margin: 0; color: var(--text-dim); font-size: 14px; }
+  .tile.wide { grid-column: span 2; }
+  ul.check { margin: 10px 0 0; padding: 0; list-style: none; color: var(--text-dim); font-size: 13.5px; }
+  ul.check li { padding: 5px 0 5px 22px; position: relative; border-top: 1px solid var(--line); }
+  ul.check li::before { content: "—"; position: absolute; left: 0; color: var(--accent); }
+
+  /* ---------- privacy ---------- */
+  .privacy { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; }
+  .pcard { border: 1px solid var(--line); background: /* subtle */ var(--bg-2); border-radius: var(--radius); padding: 22px; }
+  .pcard .k { font-family: var(--font-mono); font-size: 12px; color: var(--accent); display: block; margin-bottom: 8px; }
+  .pcard .v { font-size: 14px; color: var(--text); }
+
+  /* ---------- footer ---------- */
+  footer { border-top: 1px solid var(--line); padding: 40px 0 48px; color: var(--text-faint); font-size: 13.5px; }
+  .foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
+  .foot .right { display: flex; gap: 18px; }
+  .foot a { color: var(--text-dim); }
+  .foot a:hover { color: var(--text); text-decoration: none; }
+
+  .reveal { opacity: 0; transform: translateY(16px); transition: opacity .6s cubic-bezier(.16,1,.3,1), transform .6s cubic-bezier(.16,1,.3,1); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  @media (max-width: 860px) {
+    .hero-inner { grid-template-columns: 1fr; }
+    .nav-links { display: none; }
+    .metrics .grid { grid-template-columns: repeat(2,1fr); }
+    .bento { grid-template-columns: 1fr; }
+    .tile.wide { grid-column: span 1; }
+    .privacy { grid-template-columns: 1fr; }
+    .step { grid-template-columns: 1fr; gap: 8px; }
+    .step .tag { text-align: left; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .reveal { opacity: 1; transform: none; transition: none; }
+    .btn { transition: none; }
+    .btn:active { transform: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <div class="brand"><span class="mark">◆</span> SamsungFrame Curator</div>
+    <div class="nav-links">
+      <a href="#workflow">Workflow</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#taste">Taste Lens</a>
+    </div>
+    <a class="btn btn-ghost nav-cta" href="https://github.com/rohanpandula/samsungframe-curator">GitHub ↗</a>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <div>
+      <p class="eyebrow">Local-first studio</p>
+      <h1>Your photo library, <span class="em">curated</span> for the Frame.</h1>
+      <p class="lede">A private, offline-first studio that consolidates your library, finds its strongest images, and safely publishes them as exact Frame-ready art.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/rohanpandula/samsungframe-curator">View on GitHub</a>
+        <a class="btn btn-ghost" href="#workflow">See what it does</a>
+      </div>
+    </div>
+    <div class="hero-badge" aria-label="project status">
+      <div class="row"><span class="k">milestones</span><span class="v">M001 → M007</span></div>
+      <div class="row"><span class="k">test suite</span><span class="v">634 passing</span></div>
+      <div class="row"><span class="k">acceptance gate</span><span class="v">8 files, air-gapped</span></div>
+      <div class="row"><span class="k">requirements validated</span><span class="v">27 / 27</span></div>
+      <div class="row"><span class="k">network posture</span><span class="v">zero by default</span></div>
+    </div>
+  </div>
+</header>
+
+<section class="metrics" aria-label="project statistics">
+  <div class="wrap">
+    <div class="grid">
+      <div class="metric"><b><span class="n">27/27</span></b><span>requirements validated</span></div>
+      <div class="metric"><b><span class="n">634</span></b><span>automated tests</span></div>
+      <div class="metric"><b><span class="n">1</span></b><span>canonical content root</span></div>
+      <div class="metric"><b><span class="n">0</span></b><span>mandatory network calls</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="workflow">
+  <div class="wrap">
+    <h2 class="sec reveal">From a messy SSD to living art.</h2>
+    <p class="sub reveal">Seven milestones, one guided pipeline. The catalog is the system of record; everything downstream trusts it.</p>
+    <div class="pipe">
+      <div class="step reveal"><span class="num">01 · Catalog</span><div><h3>Non-destructive consolidation</h3><p>Ingests local folders and NAS sources (HEIC, JPEG, PNG, WebP, TIFF), detects exact and perceptual duplicates with best-original recovery, and consolidates into a single content-addressed store — sources left untouched until you approve archival.</p></div><span class="tag">SHA-256 · journaled</span></div>
+      <div class="step reveal"><span class="num">02 · Analyze</span><div><h3>Offline, deterministic analysis</h3><p>A provider-neutral engine scores technical and aesthetic quality, saliency and subjects, crop safety, color story, and pairing affinity — every signal CPU-computable and reproducible, no cloud required.</p></div><span class="tag">air-gapped</span></div>
+      <div class="step reveal"><span class="num">03 · Direct</span><div><h3>Art-direction proposals</h3><p>A deterministic policy engine suggests treatments — full-bleed, contain-and-matte, panoramic, square, or diptych — each with an explicit rationale, captured in a versioned ArtDirectionManifest.</p></div><span class="tag">explainable</span></div>
+      <div class="step reveal"><span class="num">04 · Render</span><div><h3>Deterministic renderer + validator</h3><p>One manifest renders byte-identical output at 1080p, 4K, or any exact size in sRGB. A validator gates publishability: dimensions, profile, hash, region math, no unintended cropping. Upscaling is never silent.</p></div><span class="tag">verified</span></div>
+      <div class="step reveal"><span class="num">05 · Approve</span><div><h3>Approval & history</h3><p>Per-image approve, reject, undo, redo, and batch — with append-only history and rationale. A Darkroom Bench web UI makes the whole loop usable in a browser, keyboard- and screen-reader-first.</p></div><span class="tag">WCAG AA</span></div>
+      <div class="step reveal"><span class="num">06 · Publish</span><div><h3>Safe destination adapters</h3><p>Filesystem, simulator, Samsung Art Mode (canary upload, exact-ID replace, rollback) and Home Assistant coordination with an exclusive write lease. A durable watcher ingests new photos exactly once.</p></div><span class="tag">leased · journaled</span></div>
+      <div class="step reveal"><span class="num">07 · Personalize</span><div><h3>Taste Lens</h3><p>Versioned, isolated preference profiles rerank candidates with explainable deltas, tuned by active-learning pairwise comparisons. Disable it and you get the exact baseline back. Approved output never changes.</p></div><span class="tag">reversible</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="capabilities" style="background:var(--bg-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);">
+  <div class="wrap">
+    <h2 class="sec reveal">What it does.</h2>
+    <p class="sub reveal">The full surface, end to end.</p>
+    <div class="bento">
+      <div class="tile reveal">
+        <span class="badge">Catalog</span>
+        <h3>Content-addressed store</h3>
+        <p>SHA-256 identities keep duplicate references from creating duplicate work. Connector-scoped source identity means renames, moves, and remote revisions never collide.</p>
+      </div>
+      <div class="tile high wide reveal">
+        <span class="badge">Analysis engine</span>
+        <h3>Deterministic signals, no cloud</h3>
+        <p>Perceptual embeddings, technical and aesthetic quality, subject saliency, per-direction crop safety, color story, and pairing affinity — all computed offline on CPU and reproducible run-to-run.</p>
+        <ul class="check">
+          <li>Exact + perceptual near-duplicate detection with best-original recovery</li>
+          <li>RAW and corrupt files report explicit status instead of vanishing</li>
+          <li>Provider boundary open to local, cloud, or hybrid backends later</li>
+        </ul>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Art direction</span>
+        <h3>Treatments with rationale</h3>
+        <p>Policy engine proposes full-bleed, matte, panoramic, square, or diptych, each with evidence. Explicit target overrides win. The manifest is the single source of truth for rendering.</p>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Render & validate</span>
+        <h3>Exact, verified output</h3>
+        <p>Byte-deterministic 1080p / 4K / custom sRGB from one manifest, gated by a validator that rejects wrong dimension, profile, hash, or unintended crop.</p>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Web & headless</span>
+        <h3>Control from anywhere</h3>
+        <p>A dependency-light Darkroom Bench web UI plus a headless CLI with stable exit codes and JSON output — perfect for launchd, cron, or scripting.</p>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Automation</span>
+        <h3>Watcher, collections, rotation</h3>
+        <p>A durable watcher ingests stabilized photos once. Collections and playlists rotate deterministically with intervals, shuffle-without-repeats, favorites, seasons, and show-now.</p>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Operations</span>
+        <h3>Production-ready plumbing</h3>
+        <p>A crash-safe job orchestrator with classified outcomes, packaging for macOS launchd and Docker, and a migration tool that imports a legacy Samsung SSD non-destructively.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="privacy">
+  <div class="wrap">
+    <h2 class="sec reveal">Private by construction.</h2>
+    <p class="sub reveal">Your originals, approvals, and TV credentials stay on your machine. Nothing leaves unless you explicitly turn it on and say exactly what will go.</p>
+    <div class="privacy">
+      <div class="pcard reveal"><span class="k">DEFAULT POSTURE</span><span class="v">Air-gapped. No mandatory network calls during ingest, analysis, proposal, render, or local publish.</span></div>
+      <div class="pcard reveal"><span class="k">CLOUD IF OPTED IN</span><span class="v">A plain-language disclosure lists exactly what leaves — downscaled derivatives and selected metadata only, never originals, secrets, or TV credentials.</span></div>
+      <div class="pcard reveal"><span class="k">EXCLUSIONS</span><span class="v">Per-source and per-image exclusions for full resolution, faces, GPS, and named folders, enforced before anything is sent.</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="taste" style="background:var(--bg-2);border-top:1px solid var(--line);border-bottom:1px solid var(--line);">
+  <div class="wrap">
+    <h2 class="sec reveal">Taste Lens.</h2>
+    <p class="sub reveal">After the baseline is trustworthy, add personalization without eroding it.</p>
+    <div class="bento">
+      <div class="tile wide reveal">
+        <span class="badge">Isolation first</span>
+        <h3>Ranking that is reversible and explainable</h3>
+        <p>Versioned profiles rerank candidates as a deterministic “baseline + personal delta,” each contribution explained. Disable Taste Lens and ranking returns exactly to baseline. Approved output always renders identically.</p>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Learn</span>
+        <h3>Pairwise active learning</h3>
+        <p>Informative pairs are chosen for sample efficiency; every lift against baseline is measured and gated before it is promoted.</p>
+      </div>
+      <div class="tile reveal">
+        <span class="badge">Discover</span>
+        <h3>An adaptive Taste Deck</h3>
+        <p>A federated creator catalog with artist spotlights, a likely / adjacent / wildcard feed, and a Familiar ↔ Surprising dial. Calibrated and isolated.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <span>© <span id="year">2026</span> SamsungFrame Curator · Local-first · Air-gapped by default.</span>
+    <div class="right">
+      <a href="#workflow">Workflow</a>
+      <a href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function () {
+    var year = document.getElementById('year');
+    if (year) year.textContent = new Date().getFullYear();
+
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) return;
+
+    var els = document.querySelectorAll('.reveal');
+    if (!('IntersectionObserver' in window)) {
+      els.forEach(function (e) { e.classList.add('in'); });
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+      });
+    }, { threshold: 0.12 });
+    els.forEach(function (e) { io.observe(e); });
+  })();
+</script>
+</body>
+</html>
