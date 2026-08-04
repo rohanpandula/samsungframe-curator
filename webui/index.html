@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Curator Review</title>
+  <link rel="stylesheet" href="/app/styles.css">
+</head>
+<body>
+  <header>
+    <h1>Curator Review</h1>
+  </header>
+  <main>
+    <section id="review">
+      <h2>Approval queue</h2>
+      <p class="controls">
+        <label for="status">Decision</label>
+        <select id="status" name="status">
+          <option value="">all</option>
+          <option value="pending">pending</option>
+          <option value="approved">approved</option>
+          <option value="rejected">rejected</option>
+        </select>
+        <button id="load" type="button">Load review</button>
+      </p>
+      <p id="message" role="status" aria-live="polite"></p>
+      <ul id="candidates"></ul>
+    </section>
+  </main>
+  <script src="/app/app.js"></script>
+</body>
+</html>
