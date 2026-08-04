@@ -108,6 +108,24 @@
   .principle h3{margin:10px 0 6px;font-family:var(--font-serif);font-weight:400;font-size:23px}
   .principle p{margin:0;color:var(--ink-2);font-size:15px}
 
+  /* ---------- taste: the lens vs the discovery desk ---------- */
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:clamp(28px,4vw,48px)}
+  .panel{border:1px solid var(--hair);padding:clamp(24px,3vw,36px);display:flex;flex-direction:column}
+  .panel .pmeta{font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
+  .panel h3{margin:14px 0 10px;font-family:var(--font-serif);font-weight:400;font-size:clamp(24px,2.6vw,33px);line-height:1.1;letter-spacing:-.01em}
+  .panel h3 em{font-style:italic;color:var(--accent)}
+  .panel > p{margin:0 0 18px;color:var(--ink-2)}
+  .panel .dlist{list-style:none;margin:0;padding:0;border-top:1px solid var(--hair)}
+  .panel .dlist li{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--hair);font-size:13.5px;color:var(--ink-2)}
+  .panel .dlist li::before{content:"—";color:var(--accent);flex:0 0 auto}
+  .panel.ink{background:var(--ink);border-color:var(--ink);color:var(--paper)}
+  .panel.ink .pmeta{color:rgba(246,246,243,.5)}
+  .panel.ink > p{color:rgba(246,246,243,.8)}
+  .panel.ink .dlist{border-color:rgba(246,246,243,.16)}
+  .panel.ink .dlist li{border-color:rgba(246,246,243,.16);color:rgba(246,246,243,.84)}
+  .panel.ink .dlist li::before{color:#e08a5a}
+  .panel.ink h3 em{color:#e08a5a}
+
   /* ---------- footer ---------- */
   footer{padding:44px 0 56px}
   .foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--mute);font-size:13.5px}
@@ -126,6 +144,7 @@
     .cap-grid{grid-template-columns:1fr}
     .cap-cell.wide3,.cap-cell.wide2{grid-column:span 1}
     .principles{grid-template-columns:1fr}
+    .duo{grid-template-columns:1fr}
   }
   @media(prefers-reduced-motion:reduce){
     html{scroll-behavior:auto}
@@ -263,26 +282,36 @@
   <div class="wrap">
     <div class="sec-head reveal">
       <h2>Taste <em>Lens.</em></h2>
-      <p class="sec-sub">Built only after the baseline is trustworthy. It learns how a person or household weights the qualities the analysis engine already extracts — it never replaces discovery, analysis, rendering, or your approval.</p>
+      <p class="sec-sub">Added only after the baseline is trustworthy. It learns how you weigh the qualities the analysis engine already extracts, and it is reversible: disable it and nothing changes but the ranking. Two tools live under the name: a lens that learns your eye, and a discovery desk that brings you new work.</p>
     </div>
 
-    <div class="step reveal"><span class="no">01</span><div class="body">
-      <h3>Ranking you can <em>reverse in one click</em></h3>
-      <p>Versioned profiles rerank candidates as a deterministic baseline plus a personal delta, each contribution explained. Disable Taste Lens and ranking returns to the exact baseline order — approved output always renders byte-identically, on or off.</p>
-      <div class="meta"><span>versioned</span><span>explainable</span><span>baseline-isolated</span></div>
-    </div></div>
+    <div class="duo">
+      <div class="panel reveal">
+        <span class="pmeta">The lens · your library</span>
+        <h3>Your eye, <em>made explicit.</em></h3>
+        <p>Taste Lens reranks your candidates and art-direction proposals the way you actually choose. Compare two photos and prefer one; the change lands as a small, explainable shift on top of the baseline order, and every move says why. This signal, this weight, this contribution.</p>
+        <ul class="dlist">
+          <li>Six isolated profile kinds: personal, household, room, season, guest-safe, experimental</li>
+          <li>Every ranking is the baseline plus a personal delta, with each contribution listed</li>
+          <li>Informative pairs are chosen first, and every lift is measured before it is promoted</li>
+          <li>Blend profiles, veto what you dislike, replay or undo any version</li>
+          <li>Turn it off and the exact baseline order returns; approved output stays byte-identical</li>
+        </ul>
+      </div>
 
-    <div class="step reveal"><span class="no">02</span><div class="body">
-      <h3>Trained by <em>comparing, not answering</em></h3>
-      <p>“I prefer this one” updates the profile deterministically. Informative pairs are chosen first for sample efficiency, and every improvement is measured against a held-out set before it’s promoted.</p>
-      <div class="meta"><span>active learning</span><span>gated evidence</span><span>blend + veto</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">03</span><div class="body">
-      <h3>A <em>discovery</em> desk</h3>
-      <p>Taste Lens Discovery feeds from a federated, outage-isolated creator catalog into an adaptive deck — likely, adjacent, and wildcard modes, artist spotlights, and a Familiar ↔ Surprising dial. Compare two works to calibrate. A denied creator’s work is never surfaced or acted on.</p>
-      <div class="meta"><span>federated</span><span>spotlights</span><span>familiar ↔ surprising</span><span>isolated</span></div>
-    </div></div>
+      <div class="panel ink reveal">
+        <span class="pmeta">Discovery · new work</span>
+        <h3>A wall of work <em>you haven&rsquo;t met.</em></h3>
+        <p>Taste Lens Discovery is a separate surface fed by a federated catalog of painters and photographers. The deck composes a feed in likely, adjacent, or wildcard modes, surfaces artist spotlights, and lets you lean the mix from familiar toward surprising. Compare two works and the result folds back into the same profile.</p>
+        <ul class="dlist">
+          <li>Federated and outage-isolated: a down source never breaks the deck</li>
+          <li>Likely / adjacent / wildcard feed, artist spotlights, a Familiar &harr; Surprising dial</li>
+          <li>Pairwise calibration keeps your training continuous across both tools</li>
+          <li>A denied creator is never surfaced or acted on; works stay signal-isolated</li>
+          <li>The same action returns the same result by gesture, button, or keyboard</li>
+        </ul>
+      </div>
+    </div>
   </div>
 </section>
 
