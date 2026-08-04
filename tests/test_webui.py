@@ -21,7 +21,7 @@ from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.hashing import sha256_hex
 from curator.render.renderer import DeterministicRenderer
-from curator.schema import MIGRATIONS
+from curator.schema import MIGRATIONS, SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -503,8 +503,8 @@ def test_webui_validate_unknown_artifact_sha_404(client):
 
 
 def test_schema_v7_migration_applies_renders_table(data_root, catalog):
-    """Migrations v7/v8 are present; the ``renders`` table exists."""
-    assert MIGRATIONS[-1][0] == 8
+    """Migrations v7/v8/v9 are present; the ``renders`` table exists."""
+    assert MIGRATIONS[-1][0] == SCHEMA_VERSION
     rows = catalog.db.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='renders'"
     ).fetchall()

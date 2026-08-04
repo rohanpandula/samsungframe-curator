@@ -290,6 +290,31 @@ CREATE INDEX IF NOT EXISTS idx_dest_journal_artifact
     ON dest_journal(artifact_id);
 """
 
+# Migration v9 (M005/S03): adds the append-only ``watcher_queue`` table that
+# makes the durable watcher's enqueue/idempotency/reconciliation persistent.
+# One row is appended per enqueued path and advanced in place through the
+# per-path state machine (``queued -> processing -> done | error``), mirroring
+# the ingest/consolidation journal posture. ``path`` is the normalized source
+# path, ``sha`` the content SHA-256 at enqueue time, ``size``/``mtime`` the
+# stat snapshot used for stabilization, and ``processed_at`` the wall-clock
+# completion stamp. An ``error`` row stays re-attemptable; a ``queued`` row
+# survives a crash between enqueue and done (reclaimed by the next drain).
+SCHEMA_V9_SQL = """
+CREATE TABLE IF NOT EXISTS watcher_queue (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    path         TEXT NOT NULL,
+    sha          TEXT,
+    state        TEXT NOT NULL DEFAULT 'queued',
+    size         INTEGER,
+    mtime        INTEGER,
+    enqueued_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    processed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_watcher_queue_path
+    ON watcher_queue(path);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -300,6 +325,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (6, SCHEMA_V6_SQL),
     (7, SCHEMA_V7_SQL),
     (8, SCHEMA_V8_SQL),
+    (9, SCHEMA_V9_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -322,4 +348,5 @@ EXPECTED_TABLES: list[str] = [
     "approvals",
     "renders",
     "dest_journal",
+    "watcher_queue",
 ]
