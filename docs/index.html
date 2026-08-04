@@ -171,7 +171,7 @@
     <div>
       <p class="kicker">Local-first studio · Air-gapped</p>
       <h1>Your photos, <em>curated</em> for the Frame.</h1>
-      <p class="lede">A private studio that consolidates your library, finds its strongest images, and publishes them as exact Frame-ready art — never touching the network unless you say so.</p>
+      <p class="lede">A private studio that consolidates your library, finds its strongest images, and turns them into exact Frame-ready art. It never touches the network unless you say so.</p>
       <div class="cta-row">
         <a class="cta" href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">View on GitHub</a>
         <a class="cta sec" href="#workflow">See what it does</a>
@@ -199,36 +199,36 @@
   <div class="wrap">
     <div class="sec-head reveal">
       <h2>From a messy SSD to <em>living art.</em></h2>
-      <p class="sec-sub">Seven milestones, one guided pipeline. The catalog is the system of record; everything downstream trusts it.</p>
+      <p class="sec-sub">Seven milestones, one guided pipeline. The catalog sits at the center; everything downstream trusts it.</p>
     </div>
 
     <div class="step reveal"><span class="no">01</span><div class="body">
       <h3>Consolidate, non-destructively</h3>
-      <p>Ingest local folders and NAS sources — HEIC, JPEG, PNG, WebP, TIFF — detect exact and perceptual duplicates with best-original recovery, and fold everything into one content-addressed store. Sources stay untouched until you approve archival.</p>
+      <p>Ingest local folders and NAS sources (HEIC, JPEG, PNG, WebP, TIFF), detect exact and perceptual duplicates with best-original recovery, and fold everything into one content-addressed store. Sources stay untouched until you approve archival.</p>
       <div class="meta"><span>SHA-256</span><span>journaled</span><span>resumable</span></div>
     </div></div>
 
     <div class="step reveal"><span class="no">02</span><div class="body">
       <h3>Analyze, offline and deterministically</h3>
-      <p>A provider-neutral engine scores technical and aesthetic quality, saliency and subjects, crop safety, color story, and pairing affinity — every signal computable on CPU and reproducible run-to-run, with no cloud in the happy path.</p>
+      <p>A provider-neutral engine scores technical and aesthetic quality, saliency and subjects, crop safety, color story, and pairing affinity. Every signal is computable on a CPU and reproducible run to run, and none of it needs a network.</p>
       <div class="meta"><span>raw + corrupt reported</span><span>no cloud default</span></div>
     </div></div>
 
     <div class="step reveal"><span class="no">03</span><div class="body">
       <h3>Direct the art direction</h3>
-      <p>A deterministic policy engine proposes treatments — full-bleed, contain-and-matte, panoramic, square, or diptych — each with a rationale, captured in a versioned ArtDirectionManifest with explicit target overrides.</p>
+      <p>A deterministic policy engine proposes treatments (full-bleed, contain-and-matte, panoramic, square, or diptych), each with a rationale, captured in a versioned ArtDirectionManifest with explicit target overrides.</p>
       <div class="meta"><span>explainable</span><span>versioned</span></div>
     </div></div>
 
     <div class="step reveal"><span class="no">04</span><div class="body">
       <h3>Render, then verify</h3>
-      <p>One manifest renders byte-identical output at 1080p, 4K, or any exact size in sRGB. A validator gates publishability — dimensions, profile, hash, region math, no unintended crop. Upscaling is never silent.</p>
+      <p>One manifest renders byte-identical output at 1080p, 4K, or any exact size in sRGB. A validator checks dimensions, profile, hash, region math, and that nothing was cropped unexpectedly. Upscaling is never silent.</p>
       <div class="meta"><span>1080p / 4K / custom</span><span>validated</span><span>no silent upscale</span></div>
     </div></div>
 
     <div class="step reveal"><span class="no">05</span><div class="body">
       <h3>Approve with history</h3>
-      <p>Per-image approve, reject, undo, redo, and batch, with append-only history and rationale — driven from a browser-based Darkroom Bench that is keyboard- and screen-reader-first, or from a headless CLI with stable exit codes.</p>
+      <p>Per-image approve, reject, undo, redo, and batch, with append-only history and rationale. Drive it from a browser-based Darkroom Bench that is keyboard- and screen-reader-first, or from a headless CLI with stable exit codes.</p>
       <div class="meta"><span>web UI</span><span>cli</span><span>WCAG AA</span></div>
     </div></div>
 
@@ -250,16 +250,16 @@
   <div class="wrap">
     <div class="sec-head reveal">
       <h2>Everything it does, <em>in one place.</em></h2>
-      <p class="sec-sub">The complete surface, end to end.</p>
+      <p class="sec-sub">Seven milestones of work, all of it local.</p>
     </div>
     <div class="cap-grid">
       <div class="cap-cell wide3 reveal"><h3>Content-addressed catalog</h3><p>SHA-256 identities keep duplicate references from creating duplicate work; connector-scoped source identity means renames, moves, and remote revisions never collide.</p><span class="idx">Catalog · system of record</span></div>
-      <div class="cap-cell reveal"><h3><em>Air-gapped</em> analysis</h3><p>Perceptual embeddings, quality, saliency, crop safety, and color — computed offline, reproducible.</p><span class="idx">Analysis</span></div>
+      <div class="cap-cell reveal"><h3><em>Air-gapped</em> analysis</h3><p>Perceptual embeddings, quality, saliency, crop safety, and color. Computed offline, and reproducible run to run.</p><span class="idx">Analysis</span></div>
       <div class="cap-cell wide2 reveal"><h3>Art direction + manifest</h3><p>Policy proposes treatments with rationale; explicit overrides win; one manifest drives rendering.</p><span class="idx">Art direction</span></div>
-      <div class="cap-cell wide2 ink reveal"><h3><em>Deterministic</em> renderer + validator</h3><p>Byte-identical 1080p/4K/custom sRGB from one manifest, gated by a validator that rejects wrong dimension, profile, hash, or crop.</p><span class="idx">Render · verify</span></div>
+      <div class="cap-cell wide2 ink reveal"><h3><em>Deterministic</em> renderer + validator</h3><p>Byte-identical 1080p/4K/custom sRGB from one manifest, checked by a validator that rejects a wrong dimension, profile, hash, or crop.</p><span class="idx">Render · verify</span></div>
       <div class="cap-cell reveal"><h3>Web + headless</h3><p>A dependency-light Darkroom Bench UI plus a CLI with stable exit codes and JSON.</p><span class="idx">Interface</span></div>
       <div class="cap-cell reveal"><h3>Watcher &amp; rotation</h3><p>Durable ingest of stabilized photos once; deterministic collections, intervals, seasons, and show-now.</p><span class="idx">Automation</span></div>
-      <div class="cap-cell wide3 reveal"><h3>Production plumbing</h3><p>A crash-safe job orchestrator with classified outcomes, packaging for macOS launchd and Docker, and a migration tool that imports a legacy Samsung SSD non-destructively — backups before every mutation.</p><span class="idx">Orchestrator · migrate</span></div>
+      <div class="cap-cell wide3 reveal"><h3>Production plumbing</h3><p>A crash-safe job orchestrator with classified outcomes, packaging for macOS launchd and Docker, and a migration tool that imports a legacy Samsung SSD non-destructively. Backups happen before every mutation.</p><span class="idx">Orchestrator · migrate</span></div>
     </div>
   </div>
 </section>
@@ -268,11 +268,11 @@
   <div class="wrap">
     <div class="sec-head reveal">
       <h2>Private by <em>construction.</em></h2>
-      <p class="sec-sub">Your originals, approvals, and TV credentials stay on your machine. Nothing leaves unless you turn it on — and say exactly what will.</p>
+      <p class="sec-sub">Your originals, approvals, and TV credentials stay on your machine. Nothing leaves unless you turn it on, and only after you&rsquo;ve seen exactly what will.</p>
     </div>
     <div class="principles">
       <div class="principle reveal"><span class="pno">Default posture</span><h3>Air-gapped</h3><p>No mandatory network calls during ingest, analysis, proposal, render, or a local publish.</p></div>
-      <div class="principle reveal"><span class="pno">If you opt in</span><h3>Plain disclosure</h3><p>A plain-language statement lists exactly what leaves — downscaled derivatives and selected metadata only, never originals, secrets, or TV credentials.</p></div>
+      <div class="principle reveal"><span class="pno">If you opt in</span><h3>Plain disclosure</h3><p>A plain-language statement lists exactly what leaves: downscaled derivatives and selected metadata, never originals, secrets, or TV credentials.</p></div>
       <div class="principle reveal"><span class="pno">Your control</span><h3>Per-source exclusions</h3><p>Exclude full resolution, faces, GPS, or named folders before anything is ever sent.</p></div>
     </div>
   </div>
@@ -282,15 +282,14 @@
   <div class="wrap">
     <div class="sec-head reveal">
       <h2>Taste <em>Lens.</em></h2>
-      <p class="sec-sub">Added only after the baseline is trustworthy. It learns how you weigh the qualities the analysis engine already extracts, and it is reversible: disable it and nothing changes but the ranking. Two tools live under the name: a lens that learns your eye, and a discovery desk that brings you new work.</p>
+      <p class="sec-sub">Added only after the baseline is trustworthy. It learns how you weigh the qualities the analysis engine already extracts, and it&rsquo;s reversible: turn it off and the ranking goes back to what it was. It comes in two parts, a lens that learns your eye and a discovery desk that brings you new work.</p>
     </div>
 
     <div class="duo">
       <div class="panel reveal">
         <span class="pmeta">The lens · your library</span>
         <h3>Your eye, <em>made explicit.</em></h3>
-        <p>Taste Lens reranks your candidates and art-direction proposals the way you actually choose. Compare two photos and prefer one; the change lands as a small, explainable shift on top of the baseline order, and every move says why. This signal, this weight, this contribution.</p>
-        <ul class="dlist">
+        <p>Taste Lens reranks your candidates and art-direction proposals the way you actually choose. Compare two photos and prefer one; the change lands as a small, explainable shift on top of the baseline order, and every move says why. This signal, this weight, this contribution.</p>        <ul class="dlist">
           <li>Six isolated profile kinds: personal, household, room, season, guest-safe, experimental</li>
           <li>Every ranking is the baseline plus a personal delta, with each contribution listed</li>
           <li>Informative pairs are chosen first, and every lift is measured before it is promoted</li>
