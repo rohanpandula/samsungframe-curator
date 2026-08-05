@@ -362,6 +362,91 @@ def test_cli_drop_with_note_records_observation(data_root, tmp_path, capsys, mon
         catalog.db.close()
 
 
+def test_cli_drop_prints_what_i_learned_delta(data_root, tmp_path, capsys, monkeypatch):
+    """No silent learning (R038/R035): a session always reports what it added."""
+    monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
+    img = _write_image(tmp_path / "drop.png")
+
+    assert cli.main(["taste", "drop", str(img), "--note", VERBATIM]) == 0
+
+    out = capsys.readouterr().out
+    assert "Learned from 1 new reactions" in out
+    assert "Nothing enters the profile without appearing here." in out
+    assert "vocabulary" in out or "new pattern" in out
+
+
+def test_cli_drop_asks_the_reactions_own_follow_up(data_root, tmp_path, capsys, monkeypatch):
+    """The probe generated from the reaction is shown, not discarded."""
+    monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
+    img = _write_image(tmp_path / "drop.png")
+
+    assert cli.main(["taste", "drop", str(img), "--note", VERBATIM]) == 0
+
+    out = capsys.readouterr().out
+    assert "?" in out
+    generator = ProbeGenerator()
+    expected = generator.questions_for(
+        create_observation(
+            session_id="s",
+            verbatim=VERBATIM,
+            attributes=["negative-space", "muted-palette", "quiet"],
+        )
+    )
+    assert expected[0].text in out
+
+
+def test_cli_drop_without_save_keeps_third_party_ephemeral(
+    data_root, tmp_path, capsys, monkeypatch
+):
+    """R034: retention is thumb + hash only until the user explicitly saves."""
+    monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
+    img = _write_image(tmp_path / "drop.png")
+    sha = sha256_hex(img.read_bytes())
+
+    assert cli.main(["taste", "drop", str(img), "--note", VERBATIM]) == 0
+
+    catalog = Catalog(data_root=data_root)
+    try:
+        assert catalog.get_by_hash(sha) == []
+    finally:
+        catalog.db.close()
+
+
+def test_cli_drop_with_save_promotes_to_catalog(data_root, tmp_path, capsys, monkeypatch):
+    """R034: --save is the explicit user choice that stores full resolution."""
+    monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
+    img = _write_image(tmp_path / "drop.png")
+    sha = sha256_hex(img.read_bytes())
+
+    assert cli.main(["taste", "drop", str(img), "--note", VERBATIM, "--save"]) == 0
+
+    out = capsys.readouterr().out
+    assert "saved" in out.lower()
+    assert sha[:12] in out
+
+    catalog = Catalog(data_root=data_root)
+    try:
+        assert catalog.get_by_hash(sha)
+    finally:
+        catalog.db.close()
+
+
+def test_cli_drop_save_skips_already_cataloged_images(
+    data_root, tmp_path, capsys, monkeypatch
+):
+    """A drop that is already in the catalog is not re-saved."""
+    monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
+    img = _write_image(tmp_path / "drop.png")
+    catalog = Catalog(data_root=data_root)
+    try:
+        catalog.add_source("local", "asset-1", img.read_bytes())
+    finally:
+        catalog.db.close()
+
+    assert cli.main(["taste", "drop", str(img), "--note", VERBATIM, "--save"]) == 0
+    assert "saved" not in capsys.readouterr().out.lower()
+
+
 def test_cli_drop_without_note_previews_questions(data_root, tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
     img = _write_image(tmp_path / "drop.png")

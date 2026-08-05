@@ -222,6 +222,14 @@ class ReactionRoom:
             observation=observation, question=question, followups_asked=asked
         )
 
+    def session_images(self, session: TasteSession) -> list[ImageRef]:
+        """Return the :class:`ImageRef`s *session* was opened over.
+
+        Callers need these to act on a drop after the fact — notably to promote
+        an ephemeral image into the catalog with an explicit save.
+        """
+        return list(self._session_images.get(session.id, []))
+
     def finish(self, session: TasteSession) -> int:
         """Close *session* and return its observation count."""
         self.session_store.close(session)

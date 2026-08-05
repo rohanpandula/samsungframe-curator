@@ -20,10 +20,13 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
 - ``curator validate FILE``   — gate a rendered artifact against expected provenance
                                (``--expected-sha`` + ``--target`` dims); exit 0 publishable /
                                1 not / 2 on read or parse error.
-- ``curator taste drop PATH... [--note TEXT]`` — open a reaction-room session over the
-                               dropped images: record one extracted reaction (``--note``,
-                               exit 0) or preview its deterministic probing questions
-                               (no ``--note``, exit 3).
+- ``curator taste drop PATH... [--note TEXT] [--save]`` — open a reaction-room session
+                               over the dropped images: record one extracted reaction
+                               (``--note``, exit 0, followed by the "What I learned"
+                               delta) or preview its deterministic probing questions
+                               (no ``--note``, exit 3). ``--save`` is the explicit
+                               choice that promotes ephemeral drops to full resolution
+                               in the catalog.
 - ``curator taste profile``   — print the taste profile document (vocabulary / patterns /
                                tensions / evolution) with per-claim evidence; ``--json``
                                emits the document, ``--no-seed`` drops the low-provenance
@@ -89,11 +92,14 @@ from curator.taste.dialogue.profile import (
     ProfileBuilder,
     ProfileEvent,
     ProfileStore,
+    WhatILearned,
 )
 from curator.taste.dialogue.profile import (
     TasteProfile as DialogueProfile,
 )
+from curator.taste.dialogue.retention import save_to_catalog
 from curator.taste.dialogue.room import ReactionRoom
+from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
@@ -341,6 +347,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--note",
         default=None,
         help="reaction text in the user's own words; omit to preview probing questions",
+    )
+    drop.add_argument(
+        "--save",
+        action="store_true",
+        help="also save the dropped third-party image(s) into the catalog at full "
+        "resolution (retention keeps thumbnails + hashes only without this)",
     )
 
     taste_profile = taste_sub.add_parser(
@@ -1384,13 +1396,21 @@ def _taste_drop(args: argparse.Namespace) -> int:
     try:
         room = ReactionRoom(catalog, provider, data_root)
         session = room.start(args.paths)
+        if args.save:
+            for saved in _taste_save_drops(room, session, args.paths, catalog):
+                print(f"taste drop: saved {saved} to the catalog (full resolution)")
         if args.note:
-            room.react(session, args.note)
+            turn = room.react(session, args.note)
             count = room.finish(session)
             label = "observation" if count == 1 else "observations"
             print(
                 f"taste drop: recorded reaction ({count} {label} in session {session.id})"
             )
+            if turn.question is not None:
+                print(f"  {turn.question.text}")
+            # No silent learning (R038): every session reports what it added.
+            print()
+            print(WhatILearned.delta_after(session.id, ObservationStore(catalog)).summary)
             return EXIT_OK
         questions = room.generator.questions_for(
             create_observation(session_id=session.id, verbatim="")
@@ -1405,6 +1425,33 @@ def _taste_drop(args: argparse.Namespace) -> int:
         return EXIT_NO_CHANGE
     finally:
         catalog.db.close()
+
+
+def _taste_save_drops(
+    room: ReactionRoom,
+    session: TasteSession,
+    paths: list[str],
+    catalog: Catalog,
+) -> list[str]:
+    """Promote this session's ephemeral drops into the catalog (R034).
+
+    Retention keeps third-party drops as a thumbnail + hash only; ``--save`` is
+    the explicit user choice that writes the full-resolution bytes. Already
+    cataloged drops are skipped. Returns the promoted shas, shortened.
+    """
+    by_sha = {ref.sha256: ref for ref in room.session_images(session)}
+    saved: list[str] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        ref = by_sha.get(sha256_hex(data))
+        if ref is None or not ref.ephemeral or ref.catalog_saved:
+            continue
+        save_to_catalog(ref, data, catalog)
+        saved.append(ref.sha256[:12])
+    return saved
 
 
 def _dispatch(args: argparse.Namespace) -> int:
