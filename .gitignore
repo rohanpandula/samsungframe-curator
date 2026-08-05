@@ -48,3 +48,6 @@ com[1-9]
 com[1-9].*
 lpt[1-9]
 lpt[1-9].*
+
+# Local .planning -> .gsd bridge (machine-specific symlinks)
+.planning
