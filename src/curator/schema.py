@@ -477,6 +477,46 @@ CREATE INDEX IF NOT EXISTS idx_taste_preferences_profile
     ON taste_preferences(profile_id);
 """
 
+# Migration v14 (M008/S01/T2): adds the taste dialogue persistence layer — the
+# append-only ``taste_observations`` journal and the ``taste_sessions`` registry.
+# Mirroring the v4-v13 posture (plain columns, JSON blobs for per-row payloads,
+# wall-clock ``created_at`` defaults):
+#
+# - ``taste_sessions``     — one row per dialogue session. ``id`` is a TEXT
+#   primary key supplied by the session layer (a UUID, not an autoincrement),
+#   ``kind`` names the surface that opened it (e.g. reaction-room/cli),
+#   ``images_json`` the :class:`~curator.taste.dialogue.observation.ImageRef`s
+#   the session surfaced, and ``closed_at`` is NULL until the session is closed.
+# - ``taste_observations`` — append-only per-statement records: one row per user
+#   observation, never updated or deleted. ``verbatim`` is the exact statement
+#   text, ``attributes_json`` the extracted tags, ``polarity``/``confidence``
+#   the disposition, ``images_json`` the referenced ImageRefs, and ``created_at``
+#   the wall-clock receipt stamp. An index on ``session_id`` supports
+#   chronological per-session replay.
+SCHEMA_V14_SQL = """
+CREATE TABLE IF NOT EXISTS taste_sessions (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    images_json TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    closed_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS taste_observations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    verbatim        TEXT NOT NULL,
+    attributes_json TEXT NOT NULL,
+    polarity        TEXT NOT NULL,
+    confidence      REAL NOT NULL,
+    images_json     TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_observations_session
+    ON taste_observations(session_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -492,6 +532,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (11, SCHEMA_V11_SQL),
     (12, SCHEMA_V12_SQL),
     (13, SCHEMA_V13_SQL),
+    (14, SCHEMA_V14_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -523,4 +564,6 @@ EXPECTED_TABLES: list[str] = [
     "jobs",
     "taste_profiles",
     "taste_preferences",
+    "taste_sessions",
+    "taste_observations",
 ]

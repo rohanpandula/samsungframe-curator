@@ -214,7 +214,7 @@ def test_schema_v10_tables_and_version(catalog):
     tables = _db.table_names(catalog.db)
     for table in ("playlists", "playlist_members", "rotation_state"):
         assert table in tables
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     for table in ("playlists", "playlist_members", "rotation_state"):
         assert table in EXPECTED_TABLES
     for table in ("immich_sync_state", "immich_asset_state"):

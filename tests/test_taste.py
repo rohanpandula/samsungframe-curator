@@ -300,7 +300,7 @@ def test_schema_v13_taste_tables_exist(data_root):
     db = _db.connect(data_root)
     _db.migrate(db)
     tables = _db.table_names(db)
-    assert SCHEMA_VERSION == 13
+    assert SCHEMA_VERSION == 14
     assert "taste_profiles" in tables
     assert "taste_preferences" in tables
     assert "taste_profiles" in EXPECTED_TABLES
