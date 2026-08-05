@@ -380,16 +380,19 @@ def test_cli_drop_unavailable_without_provider(data_root, tmp_path, capsys):
     assert "error" in err.lower()
 
 
-def test_cli_profile_stub_exits_fatal(data_root, capsys):
+def test_cli_profile_renders_empty_profile(data_root, capsys):
+    """An empty profile still renders the document (no hard dependency, R038)."""
     rc = cli.main(["taste", "profile"])
-    assert rc == 2
+    assert rc == 0
     out = capsys.readouterr().out
-    assert "not yet implemented" in out.lower()
+    assert "Taste Profile" in out
+    for section in ("Vocabulary:", "Patterns:", "Tensions:", "Evolution:"):
+        assert section in out
 
 
-def test_cli_dispute_stub_exits_fatal(data_root, capsys):
+def test_cli_dispute_unknown_claim_reports_no_change(data_root, capsys):
+    """Disputing a claim the profile never made changes nothing (exit 3)."""
     rc = cli.main(["taste", "dispute", "claim-123"])
-    assert rc == 2
+    assert rc == 3
     out = capsys.readouterr().out
-    assert "not yet implemented" in out.lower()
     assert "claim-123" in out

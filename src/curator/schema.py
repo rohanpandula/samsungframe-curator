@@ -517,6 +517,41 @@ CREATE INDEX IF NOT EXISTS idx_taste_observations_session
     ON taste_observations(session_id);
 """
 
+# Migration v15 (M008/S04/T1): adds the taste-profile document + its append-only
+# timeline. Mirrors the v14 posture (JSON blob payloads, wall-clock ``*_at``
+# defaults):
+#
+# - ``taste_profile_doc``    — the single current profile document (``id`` is
+#   pinned to 1 by a CHECK constraint). ``profile_json`` is the full
+#   :class:`~curator.taste.dialogue.profile.TasteProfile` serialization and
+#   ``version`` its monotonic document version. Rebuilding the profile replaces
+#   this row; the timeline below is what preserves history.
+# - ``taste_profile_events`` — append-only pin/edit/dispute records, never
+#   updated or deleted. ``claim_id`` names the affected
+#   :class:`~curator.taste.dialogue.profile.TasteClaim`, ``kind`` is
+#   pin/edit/dispute and ``detail`` carries the new text (edit) or the evidence
+#   marked for re-interpretation (dispute).
+SCHEMA_V15_SQL = """
+CREATE TABLE IF NOT EXISTS taste_profile_doc (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    profile_json TEXT NOT NULL,
+    version      INTEGER NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT
+);
+
+CREATE TABLE IF NOT EXISTS taste_profile_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id   TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    detail     TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_taste_profile_events_claim
+    ON taste_profile_events(claim_id);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -533,6 +568,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (12, SCHEMA_V12_SQL),
     (13, SCHEMA_V13_SQL),
     (14, SCHEMA_V14_SQL),
+    (15, SCHEMA_V15_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -566,4 +602,6 @@ EXPECTED_TABLES: list[str] = [
     "taste_preferences",
     "taste_sessions",
     "taste_observations",
+    "taste_profile_doc",
+    "taste_profile_events",
 ]

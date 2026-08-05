@@ -23,8 +23,14 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
 - ``curator taste drop PATH... [--note TEXT]`` — open a reaction-room session over the
                                dropped images: record one extracted reaction (``--note``,
                                exit 0) or preview its deterministic probing questions
-                               (no ``--note``, exit 3). ``taste profile``/``dispute`` are
-                               stubs (exit 2) wired by S04.
+                               (no ``--note``, exit 3).
+- ``curator taste profile``   — print the taste profile document (vocabulary / patterns /
+                               tensions / evolution) with per-claim evidence; ``--json``
+                               emits the document, ``--no-seed`` drops the low-provenance
+                               approval/pairwise history claims.
+- ``curator taste dispute ID`` — remove a claim and mark its evidence for
+                               re-interpretation on the append-only timeline (exit 3 when
+                               no claim carries that id).
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -33,6 +39,7 @@ honors that environment variable wherever it points the data root.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import shutil
@@ -77,7 +84,17 @@ from curator.render.validate import ArtifactValidator, ValidationReport
 from curator.scan import ScanDiff, scan_connector
 from curator.taste.dialogue.extraction import resolve_extraction_provider
 from curator.taste.dialogue.observation import create_observation
+from curator.taste.dialogue.profile import (
+    ColdStartSeeder,
+    ProfileBuilder,
+    ProfileEvent,
+    ProfileStore,
+)
+from curator.taste.dialogue.profile import (
+    TasteProfile as DialogueProfile,
+)
 from curator.taste.dialogue.room import ReactionRoom
+from curator.taste.dialogue.store import ObservationStore
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
 # 3=no-change. Every subcommand returns one of these; ``main`` maps uncaught
@@ -326,14 +343,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="reaction text in the user's own words; omit to preview probing questions",
     )
 
-    taste_sub.add_parser(
-        "profile", help="print the taste profile (not yet implemented)"
+    taste_profile = taste_sub.add_parser(
+        "profile",
+        help="print the taste profile (vocabulary / patterns / tensions / evolution)",
+    )
+    taste_profile.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the profile document as JSON instead of readable text",
+    )
+    taste_profile.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="omit low-provenance claims seeded from approval/pairwise history",
     )
 
     dispute = taste_sub.add_parser(
-        "dispute", help="dispute a profile claim (not yet implemented)"
+        "dispute",
+        help="dispute a profile claim: removes it and marks its evidence for "
+        "re-interpretation",
     )
     dispute.add_argument("claim_id", help="profile claim id to dispute")
+    dispute.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the recorded dispute event as JSON",
+    )
 
     headless = sub.add_parser(
         "headless",
@@ -1191,12 +1226,132 @@ def _taste(args: argparse.Namespace) -> int:
     if args.taste_command == "drop":
         return _taste_drop(args)
     if args.taste_command == "profile":
-        print("taste profile: not yet implemented (S04 wires this)")
-        return EXIT_FATAL
+        return _taste_profile(args)
     if args.taste_command == "dispute":
-        print(f"taste dispute {args.claim_id}: not yet implemented (S04 wires this)")
-        return EXIT_FATAL
+        return _taste_dispute(args)
     return EXIT_FATAL
+
+
+def _taste_current_profile(catalog: Catalog, *, seed: bool = True) -> DialogueProfile:
+    """Return the current taste profile, rebuilt from observations.
+
+    Rebuilds from the append-only observation journal so the document always
+    reflects every recorded reaction, re-applies the persisted pin/edit/dispute
+    timeline on top (those are the user's corrections, not derived state), and
+    optionally appends low-provenance claims seeded from approve/reject +
+    pairwise history.
+    """
+    store = ProfileStore(catalog)
+    profile = ProfileBuilder().build(ObservationStore(catalog).all())
+    if seed:
+        profile = ColdStartSeeder(catalog).seed(profile)
+    for event in store.events():
+        profile = _apply_profile_event(profile, event)
+    return profile
+
+
+def _apply_profile_event(profile: DialogueProfile, event: ProfileEvent) -> DialogueProfile:
+    """Re-apply one timeline *event* to a freshly rebuilt *profile*."""
+    store_ops = {
+        "pin": lambda c: dataclasses.replace(c, status="pinned"),
+        "edit": lambda c: dataclasses.replace(c, text=event.detail, status="edited"),
+    }
+    if event.kind == "dispute":
+        return dataclasses.replace(
+            profile,
+            patterns=[c for c in profile.patterns if c.id != event.claim_id],
+            tensions=[c for c in profile.tensions if c.id != event.claim_id],
+        )
+    op = store_ops[event.kind]
+    return dataclasses.replace(
+        profile,
+        patterns=[op(c) if c.id == event.claim_id else c for c in profile.patterns],
+        tensions=[op(c) if c.id == event.claim_id else c for c in profile.tensions],
+    )
+
+
+def _taste_profile(args: argparse.Namespace) -> int:
+    """Print the taste profile document (readable text, or ``--json``)."""
+    catalog = Catalog()
+    try:
+        profile = _taste_current_profile(catalog, seed=not args.no_seed)
+        if args.json:
+            print(json.dumps(profile.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(_format_taste_profile(profile))
+        return EXIT_OK
+    finally:
+        catalog.db.close()
+
+
+def _taste_dispute(args: argparse.Namespace) -> int:
+    """Dispute a profile claim: remove it and mark its evidence for re-interpretation.
+
+    Exits :data:`EXIT_NO_CHANGE` when no claim carries that id — a dispute is only
+    recorded against a claim the profile actually makes.
+    """
+    catalog = Catalog()
+    try:
+        profile = _taste_current_profile(catalog)
+        claim = next(
+            (c for c in list(profile.patterns) + list(profile.tensions)
+             if c.id == args.claim_id),
+            None,
+        )
+        if claim is None:
+            print(f"taste dispute: no claim with id {args.claim_id!r}")
+            return EXIT_NO_CHANGE
+        store = ProfileStore(catalog)
+        store.apply(profile)
+        event = store.dispute(args.claim_id)
+        if args.json:
+            print(json.dumps(event.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(f"taste dispute: removed claim {args.claim_id}")
+            print(f"  was: {claim.text}")
+            print(f"  {event.detail}")
+        return EXIT_OK
+    finally:
+        catalog.db.close()
+
+
+def _format_taste_profile(profile: DialogueProfile) -> str:
+    """Render the profile as the human-readable document (R035)."""
+    lines = [f"Taste Profile (version {profile.version})"]
+    lines.append("")
+    lines.append("Vocabulary:")
+    if not profile.vocabulary:
+        lines.append("  (empty — react to some images with `curator taste drop`)")
+    for word, entry in profile.vocabulary.items():
+        lines.append(
+            f"  {word} -> {entry['attribute']} ({entry['usage_count']} uses)"
+        )
+    for title, claims in (("Patterns", profile.patterns), ("Tensions", profile.tensions)):
+        lines.append("")
+        lines.append(f"{title}:")
+        if not claims:
+            lines.append("  (none yet)")
+        for claim in claims:
+            lines.append(f"  [{claim.id}] {claim.text}")
+            lines.append(
+                f"    status={claim.status} provenance={claim.provenance}"
+                f" evidence={len(claim.evidence)}"
+            )
+            for ref in claim.evidence:
+                lines.append(
+                    f"      - {ref.image_sha[:12]} \"{ref.verbatim}\""
+                    f" (confidence {ref.confidence:.2f}, {ref.created_at})"
+                )
+    lines.append("")
+    lines.append("Evolution:")
+    if not profile.evolution:
+        lines.append("  (none yet)")
+    for entry in profile.evolution:
+        # An empty ``at`` is legitimate (a profile built from zero observations
+        # has no stamp to inherit) — print the summary alone rather than ": ...".
+        prefix = f"{entry['at']}: " if entry["at"] else ""
+        lines.append(f"  {prefix}{entry['summary']}")
+    return "\n".join(lines)
 
 
 def _taste_extraction_config() -> dict[str, Any] | None:

@@ -135,7 +135,7 @@ def test_v14_migration_tables_and_index(data_root):
     conn = _db.connect(data_root)
     _db.migrate(conn)
     try:
-        assert SCHEMA_VERSION == 14
+        assert SCHEMA_VERSION >= 14
         tables = _db.table_names(conn)
         assert "taste_observations" in tables
         assert "taste_sessions" in tables

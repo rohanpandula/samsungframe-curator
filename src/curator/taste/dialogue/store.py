@@ -40,8 +40,12 @@ _OBSERVATION_COLUMNS = [
 
 
 def _utc_now() -> str:
-    """Return an ISO-8601 UTC timestamp (matches the schema *_at convention)."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%fZ")
+    """Return an ISO-8601 UTC timestamp (matches the schema *_at convention).
+
+    Microsecond precision keeps same-second appends distinguishable, and the
+    fixed-width fields keep lexical order identical to chronological order.
+    """
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _images_to_json(images: list[ImageRef]) -> str:
