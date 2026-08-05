@@ -4,164 +4,212 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="color-scheme" content="light" />
-<meta name="description" content="SamsungFrame Curator — a private, offline-first studio that consolidates, curates, analyzes, renders, and safely publishes your photo library to a Samsung Frame." />
-<title>SamsungFrame Curator — your photos, curated for the Frame</title>
+<meta name="description" content="SamsungFrame Curator — a private, offline studio that turns your photo library into a rotating art wall on a Samsung Frame." />
+<title>SamsungFrame Curator — your photos, curated for the frame</title>
 <style>
   :root{
-    --paper:#f6f6f3;
-    --ink:#161614;
-    --ink-2:#3a3a36;
-    --mute:#77756d;
-    --hair:#e2e1db;
-    --accent:#b24a2b; /* single clay pop on neutral paper */
-    --accent-soft:rgba(178,74,43,.08);
-    --font-serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
-    --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --paper:#f7f6f2;
+    --plane:#eae8e1;
+    --plane-2:#d8d5cb;
+    --ink:#161514;
+    --ink-soft:#45433d;
+    --mute:#6c685d;
+    --yellow-ink:#8f6b00;
+    --line:#161514;
+    --red:#d7261f;
+    --yellow:#f4c21b;
+    --blue:#1f48b0;
+    --r:0px;
+    --font:"Futura","Century Gothic","Trebuchet MS","Helvetica Neue",Arial,sans-serif;
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
   body{
     margin:0;background:var(--paper);color:var(--ink);
-    font-family:var(--font-ui);line-height:1.65;
-    font-size:16px;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    font-family:var(--font);line-height:1.6;-webkit-font-smoothing:antialiased;
+    -webkit-text-size-adjust:100%;text-rendering:optimizeLegibility;
   }
-  ::selection{background:var(--accent-soft);color:var(--ink)}
-  a{color:var(--accent);text-decoration:none}
-  a:hover{text-decoration:underline}
-  .wrap{max-width:1140px;margin:0 auto;padding:0 clamp(20px,5vw,64px)}
+  /* the frame: one black structural border around the whole composition */
+  .frame-shell{border:2px solid var(--ink);margin:14px;outline:1px solid var(--ink)}
+  .frame-shell>*{border:0}
+  a{color:var(--ink);text-decoration:none;border-bottom:1px solid transparent}
+  a:hover{border-bottom-color:var(--ink)}
+  ::selection{background:var(--yellow);color:var(--ink)}
 
-  /* ---------- nav ---------- */
-  .nav{border-bottom:1px solid var(--hair)}
-  .nav-inner{display:flex;align-items:center;justify-content:space-between;height:60px}
-  .brand{font-family:var(--font-serif);font-style:italic;font-size:18px;font-weight:500;letter-spacing:-.01em}
-  .nav-links{display:flex;gap:26px;font-size:13.5px;color:var(--mute)}
-  .nav-links a{color:inherit}
-  .nav-links a:hover{color:var(--ink);text-decoration:none}
+  .wrap{max-width:1200px;margin:0 auto;padding:0 clamp(18px,4vw,48px)}
+  .mono{font-variant-numeric:tabular-nums}
 
-  /* ---------- hero ---------- */
-  header.hero{padding:clamp(56px,10vh,110px) 0 clamp(40px,6vh,64px);border-bottom:1px solid var(--hair)}
-  .hero-inner{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:clamp(28px,5vw,72px);align-items:center}
-  .kicker{font-family:var(--font-mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--mute);margin:0 0 22px}
+  /* nav: one continuous plane, partition by black rules */
+  nav.nav{border-bottom:2px solid var(--ink)}
+  .nav-inner{display:flex;align-items:center;justify-content:space-between;height:64px;gap:16px}
+  .brand{font-size:17px;font-weight:600;letter-spacing:.01em;text-transform:lowercase}
+  .brand b{font-weight:600}
+  .nav-links{display:flex;gap:26px;font-size:14.5px}
+  .nav-links a{color:var(--ink-soft);border-bottom:0}
+  .nav-links a:hover{color:var(--ink);border-bottom:2px solid var(--ink)}
+  @media(max-width:760px){.nav-links{display:none}}
+
+  /* ---------- first viewport: the room ---------- */
+  header.hero{padding:clamp(28px,5vw,64px) 0 clamp(24px,4vw,48px)}
+  .hero-inner{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:clamp(24px,5vw,64px);align-items:start}
   h1{
-    margin:0 0 22px;font-family:var(--font-serif);font-weight:400;
-    font-size:clamp(40px,6.4vw,82px);line-height:1.02;letter-spacing:-.02em;max-width:11ch;
+    margin:0 0 22px;font-size:clamp(40px,6vw,78px);line-height:.96;letter-spacing:-.015em;
+    font-weight:600;text-transform:lowercase;text-wrap:balance;
   }
-  h1 em{font-style:italic;color:var(--accent)}
-  .lede{margin:0 0 30px;color:var(--ink-2);font-size:clamp(16px,1.9vw,19px);max-width:47ch}
-  .cta-row{display:flex;gap:28px;align-items:center;flex-wrap:wrap}
-  .cta{font-weight:600;font-size:15px;border-bottom:1.5px solid var(--ink);padding-bottom:3px}
-  .cta:hover{text-decoration:none;border-color:var(--accent);color:var(--accent)}
-  .cta.sec{color:var(--mute);border-color:var(--hair)}
-  .cta.sec:hover{color:var(--ink);border-color:var(--ink)}
+  h1 .red{color:var(--red)}
+  h1 .blue{color:var(--blue)}
+  h1 .yellow{color:var(--yellow-ink)}
+  .lede{margin:0 0 28px;font-size:clamp(16px,1.8vw,19px);color:var(--ink-soft);max-width:44ch}
+  .cta-row{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  /* primary color only on the moving edge: the CTA is a red plane */
+  .cta{
+    display:inline-block;padding:13px 24px;background:var(--red);color:#fff;
+    font-weight:600;font-size:15.5px;letter-spacing:.02em;border:2px solid var(--ink);
+    text-transform:lowercase;box-shadow:4px 4px 0 var(--ink);transition:transform .14s ease-out;
+  }
+  .cta:hover{transform:translate(1px,1px);border-bottom:2px solid var(--ink)}
+  .cta:active{transform:translate(3px,3px);box-shadow:1px 1px 0 var(--ink)}
+  .cta.ghost{background:var(--paper);color:var(--ink);box-shadow:none}
+  .cta.ghost:hover{background:var(--plane)}
 
-  /* framed art panel (the "Frame") */
-  .frame{border:1px solid var(--hair);padding:clamp(10px,1.6vw,18px);background:#fff;box-shadow:0 1px 0 rgba(0,0,0,.03)}
-  .frame .matte{aspect-ratio:16/9;background:linear-gradient(140deg,#14110e 0%,#2a241d 55%,#b24a2b 135%);position:relative;overflow:hidden}
-  .frame .matte::after{content:"";position:absolute;inset:0;background:radial-gradient(120% 90% at 30% 18%,rgba(255,255,255,.10),transparent 44%)}
-  .frame figcaption{display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.08em;color:var(--mute);text-transform:uppercase;padding:12px 2px 2px}
+  /* the frame-on-the-page: a live art plane you operate */
+  .stage{position:relative;border:2px solid var(--ink);background:var(--plane);padding:14px}
+  .art-pane{position:relative;aspect-ratio:16/9;overflow:hidden;border:2px solid var(--ink);background:#eeece4}
+  .art-pane .photo{
+    position:absolute;inset:0;transition:transform .45s cubic-bezier(.16,1,.3,1),opacity .45s;
+  }
+  .art-pane .photo.p1{transform:translateX(0);opacity:1}
+  .art-pane .photo.p2{transform:translateX(102%);opacity:0}
+  /* each "artwork" is a De Stijl composition in the world's palette */
+  .comp{width:100%;height:100%;position:relative;overflow:hidden}
+  .comp.c1{background:var(--paper)}
+  .comp.c1 .b1{position:absolute;left:0;top:0;width:58%;height:100%;background:var(--red)}
+  .comp.c1 .b2{position:absolute;right:0;bottom:0;width:42%;height:62%;background:var(--yellow)}
+  .comp.c1 .b3{position:absolute;right:0;top:0;width:42%;height:38%;background:var(--blue)}
+  .comp.c2{background:var(--paper)}
+  .comp.c2 .b1{position:absolute;left:0;bottom:0;width:100%;height:24%;background:var(--ink)}
+  .comp.c2 .b2{position:absolute;right:12%;top:0;width:26%;height:100%;background:var(--red)}
+  .comp.c3{background:var(--plane-2)}
+  .comp.c3 .b1{position:absolute;inset:0 0 0 0;background:radial-gradient(120% 100% at 70% 10%,var(--yellow),var(--red) 60%,var(--blue) 120%)}
+  .stage-caption{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 2px 2px}
+  .stage-caption .label{font-size:12.5px;letter-spacing:.04em;color:var(--mute);text-transform:lowercase}
+  .stage-ctrl{display:flex;gap:0;border:2px solid var(--ink)}
+  .stage-ctrl button{
+    appearance:none;border:0;background:transparent;cursor:pointer;padding:0;width:34px;height:34px;
+    font:inherit;color:var(--ink);display:grid;place-items:center;font-size:16px;
+  }
+  .stage-ctrl button + button{border-left:2px solid var(--ink)}
+  .stage-ctrl button:hover{background:var(--yellow)}
+  .stage-ctrl button:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 
-  /* ---------- stat strip ---------- */
-  .stats{border-bottom:1px solid var(--hair)}
-  .stats .row{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--hair)}
-  .stat{background:var(--paper);padding:20px 18px}
-  .stat b{font-family:var(--font-serif);font-size:clamp(22px,3vw,30px);font-weight:400;letter-spacing:-.01em}
-  .stat b span{color:var(--accent)}
-  .stat small{display:block;font-size:12px;color:var(--mute);margin-top:2px}
+  /* ---------- metric band: a row of planes ---------- */
+  .metrics{border-top:2px solid var(--ink);border-bottom:2px solid var(--ink)}
+  .metrics .row{display:grid;grid-template-columns:repeat(4,1fr)}
+  .metric{border-right:2px solid var(--ink);padding:22px 20px;background:var(--paper)}
+  .metric:last-child{border-right:0}
+  .metric b{font-size:clamp(26px,3.4vw,40px);font-weight:600;letter-spacing:-.01em}
+  .metric b span{color:var(--red)}
+  .metric small{display:block;font-size:13px;color:var(--mute);margin-top:2px;text-transform:lowercase}
+  @media(max-width:760px){.metrics .row{grid-template-columns:repeat(2,1fr)}.metric:nth-child(2){border-right:0}}
 
   /* ---------- sections ---------- */
-  section.block{padding:clamp(64px,11vw,130px) 0;border-bottom:1px solid var(--hair)}
-  section.block:last-of-type{border-bottom:0}
-  .sec-head{max-width:56ch;margin-bottom:clamp(34px,5vw,60px)}
-  h2.sec{margin:0 0 14px;font-family:var(--font-serif);font-weight:400;font-size:clamp(28px,4vw,50px);line-height:1.06;letter-spacing:-.015em}
-  h2.sec em{font-style:italic;color:var(--accent)}
-  .sec-sub{margin:0;color:var(--ink-2);font-size:16.5px}
+  section.block{padding:clamp(56px,9vw,112px) 0;border-bottom:2px solid var(--ink)}
+  .sec-head{max-width:60ch;margin-bottom:clamp(30px,5vw,56px)}
+  h2.sec{margin:0 0 12px;font-size:clamp(30px,4.6vw,56px);line-height:1.0;letter-spacing:-.012em;font-weight:600;text-transform:lowercase}
+  .sec-sub{margin:0;font-size:16.5px;color:var(--ink-soft);max-width:56ch}
 
-  /* ---------- workflow: editorial catalogue ---------- */
-  .step{display:grid;grid-template-columns:clamp(52px,7vw,96px) minmax(0,1fr);gap:clamp(18px,3vw,44px);border-top:1px solid var(--hair);padding:clamp(22px,4vw,40px) 0}
-  .step:last-child{border-bottom:1px solid var(--hair)}
-  .step .no{font-family:var(--font-serif);font-style:italic;font-size:clamp(20px,2.6vw,30px);color:var(--accent)}
-  .step .body{}
-  .step h3{margin:0 0 8px;font-size:clamp(20px,2.4vw,27px);font-weight:600;letter-spacing:-.01em}
-  .step h3 em{font-style:italic}
-  .step p{margin:0;max-width:64ch;color:var(--ink-2)}
-  .step .meta{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:14px;font-family:var(--font-mono);font-size:11px;letter-spacing:.04em;color:var(--mute);text-transform:uppercase}
-  .step .meta span{border:1px solid var(--hair);border-radius:999px;padding:3px 10px}
+  /* the pipeline as sliding planes */
+  .pipe{display:grid;grid-template-columns:1fr;border:2px solid var(--ink)}
+  .step{display:grid;grid-template-columns:clamp(56px,8vw,120px) 1fr;border-bottom:2px solid var(--ink);background:var(--paper);position:relative}
+  .step:last-child{border-bottom:0}
+  .step .no{display:flex;align-items:flex-start;padding:22px 0 22px 20px;font-size:14px;letter-spacing:.06em;color:var(--mute);text-transform:lowercase;border-right:2px solid var(--ink)}
+  .step .body{padding:22px 24px}
+  .step h3{margin:0 0 6px;font-size:22px;font-weight:600;letter-spacing:-.005em;text-transform:lowercase}
+  .step h3 em{font-style:normal;color:var(--red)}
+  .step p{margin:0;max-width:62ch;color:var(--ink-soft)}
+  .step .meta{margin-top:12px;font-size:12px;letter-spacing:.06em;color:var(--mute);text-transform:lowercase}
+  /* a color joint on the moving edge of every other step */
+  .step:nth-child(odd)::before{content:"";position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--yellow)}
+  .step:nth-child(even)::before{content:"";position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--blue)}
+  @media(max-width:760px){.step{grid-template-columns:1fr}.step .no{border-right:0;padding:16px 20px 0}}
 
-  /* ---------- capabilities: varied, not card soup ---------- */
-  .cap-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--hair);border:1px solid var(--hair)}
-  .cap-cell{background:var(--paper);padding:26px 24px;min-height:200px;display:flex;flex-direction:column}
-  .cap-cell.wide3{grid-column:span 3}
-  .cap-cell.wide2{grid-column:span 2}
-  .cap-cell h3{margin:0 0 8px;font-size:18px;font-weight:600;letter-spacing:-.01em}
-  .cap-cell h3 em{font-style:italic}
-  .cap-cell p{margin:0;color:var(--ink-2);font-size:14.5px}
-  .cap-cell.ink{background:var(--ink);color:var(--paper)}
-  .cap-cell.ink p{color:rgba(246,246,243,.72)}
-  .cap-cell.ink h3 em{color:#e08a5a}
-  .cap-cell .idx{margin-top:auto;padding-top:16px;font-family:var(--font-mono);font-size:10.5px;letter-spacing:.1em;color:var(--mute);text-transform:uppercase}
-  .cap-cell.ink .idx{color:rgba(246,246,243,.5)}
+  /* features: a De Stijl composition grid */
+  .compo{display:grid;grid-template-columns:repeat(6,1fr);gap:0;border:2px solid var(--ink)}
+  .cell{border:1px solid var(--ink);padding:24px;background:var(--paper);display:flex;flex-direction:column;min-height:170px}
+  .cell .tag{margin-bottom:14px;font-size:12px;letter-spacing:.08em;color:var(--mute);text-transform:lowercase}
+  .cell h3{margin:0 0 6px;font-size:19px;font-weight:600;text-transform:lowercase}
+  .cell h3 em{font-style:normal;color:var(--red)}
+  .cell p{margin:0;font-size:14.5px;color:var(--ink-soft)}
+  .cell .idx{margin-top:auto;padding-top:14px;font-size:11px;letter-spacing:.1em;color:var(--mute);text-transform:lowercase}
+  .cell.wide3{grid-column:span 3}
+  .cell.wide2{grid-column:span 2}
+  .cell.red{background:var(--red);color:#fff}
+  .cell.red .tag,.cell.red p,.cell.red .idx{color:rgba(255,255,255,.85)}
+  .cell.red h3 em{color:#ffe08a}
+  .cell.yellow{background:var(--yellow);color:var(--ink)}
+  .cell.yellow .tag,.cell.yellow p,.cell.yellow .idx{color:rgba(22,21,20,.78)}
+  .cell.blue{background:var(--blue);color:#fff}
+  .cell.blue .tag,.cell.blue p,.cell.blue .idx{color:rgba(255,255,255,.85)}
+  .cell.ink{background:var(--ink);color:var(--paper)}
+  .cell.ink .tag,.cell.ink p,.cell.ink .idx{color:rgba(247,246,242,.72)}
+  @media(max-width:860px){.compo{grid-template-columns:1fr}.cell.wide3,.cell.wide2{grid-column:span 1}}
 
-  /* ---------- principles ---------- */
-  .principles{display:grid;grid-template-columns:repeat(3,1fr);gap:clamp(24px,4vw,48px)}
-  .principle .pno{font-family:var(--font-mono);font-size:11.5px;letter-spacing:.1em;color:var(--accent);text-transform:uppercase}
-  .principle h3{margin:10px 0 6px;font-family:var(--font-serif);font-weight:400;font-size:23px}
-  .principle p{margin:0;color:var(--ink-2);font-size:15px}
+  /* principles */
+  .principles{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:2px solid var(--ink)}
+  .principle{padding:26px 24px;border-right:2px solid var(--ink);border-bottom:2px solid var(--ink);background:var(--paper)}
+  .principle:last-child{border-right:0}
+  .principle .pno{font-size:12px;letter-spacing:.1em;color:var(--blue);text-transform:lowercase}
+  .principle h3{margin:10px 0 6px;font-size:22px;font-weight:600;text-transform:lowercase}
+  .principle p{margin:0;font-size:15px;color:var(--ink-soft)}
+  @media(max-width:760px){.principles{grid-template-columns:1fr}.principle{border-right:0}}
 
-  /* ---------- taste: the lens vs the discovery desk ---------- */
-  .duo{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:clamp(28px,4vw,48px)}
-  .panel{border:1px solid var(--hair);padding:clamp(24px,3vw,36px);display:flex;flex-direction:column}
-  .panel .pmeta{font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute)}
-  .panel h3{margin:14px 0 10px;font-family:var(--font-serif);font-weight:400;font-size:clamp(24px,2.6vw,33px);line-height:1.1;letter-spacing:-.01em}
-  .panel h3 em{font-style:italic;color:var(--accent)}
-  .panel > p{margin:0 0 18px;color:var(--ink-2)}
-  .panel .dlist{list-style:none;margin:0;padding:0;border-top:1px solid var(--hair)}
-  .panel .dlist li{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--hair);font-size:13.5px;color:var(--ink-2)}
-  .panel .dlist li::before{content:"—";color:var(--accent);flex:0 0 auto}
-  .panel.ink{background:var(--ink);border-color:var(--ink);color:var(--paper)}
-  .panel.ink .pmeta{color:rgba(246,246,243,.5)}
-  .panel.ink > p{color:rgba(246,246,243,.8)}
-  .panel.ink .dlist{border-color:rgba(246,246,243,.16)}
-  .panel.ink .dlist li{border-color:rgba(246,246,243,.16);color:rgba(246,246,243,.84)}
-  .panel.ink .dlist li::before{color:#e08a5a}
-  .panel.ink h3 em{color:#e08a5a}
+  /* taste: two sliding planes */
+  .duo{display:grid;grid-template-columns:1fr 1fr;gap:0;border:2px solid var(--ink)}
+  .panel{border-right:2px solid var(--ink);padding:clamp(26px,4vw,44px);background:var(--paper)}
+  .panel:last-child{border-right:0}
+  .panel .pmeta{font-size:12px;letter-spacing:.1em;color:var(--mute);text-transform:lowercase}
+  .panel h3{margin:14px 0 10px;font-size:clamp(24px,2.6vw,34px);line-height:1.05;font-weight:600;text-transform:lowercase}
+  .panel h3 em{font-style:normal;color:var(--red)}
+  .panel > p{margin:0 0 18px;color:var(--ink-soft);font-size:15.5px}
+  .panel .dlist{list-style:none;margin:0;padding:0;border-top:2px solid var(--ink)}
+  .panel .dlist li{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--ink);font-size:13.5px;color:var(--ink-soft)}
+  .panel .dlist li::before{content:"";width:10px;height:10px;flex:0 0 auto;margin-top:6px;background:var(--yellow);border:1px solid var(--ink)}
+  .panel.blue h3 em{color:var(--blue)}
+  .panel.blue .dlist li::before{background:var(--blue)}
+  @media(max-width:760px){.duo{grid-template-columns:1fr}.panel{border-right:0;border-bottom:2px solid var(--ink)}.panel:last-child{border-bottom:0}}
 
-  /* ---------- footer ---------- */
-  footer{padding:44px 0 56px}
-  .foot{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;color:var(--mute);font-size:13.5px}
+  footer{border-top:2px solid var(--ink);padding:36px 0 40px}
+  .foot{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;color:var(--mute);font-size:13.5px}
   .foot .right{display:flex;gap:20px}
-  .foot a{color:var(--mute)}
-  .foot a:hover{color:var(--ink);text-decoration:none}
+  .foot a{color:var(--ink-soft)}
 
-  .reveal{opacity:0;transform:translateY(14px);transition:opacity .6s cubic-bezier(.16,1,.3,1),transform .6s cubic-bezier(.16,1,.3,1)}
-  .reveal.in{opacity:1;transform:none}
+  /* sliding reveals — safe by default: only the .js-io class (added by JS
+     when IntersectionObserver is confirmed) opts into hiding + animating */
+  html:not(.js-io) .slide{opacity:1;transform:none}
+  .js-io .slide{opacity:0}
+  .js-io .slide.from-l{transform:translateX(-28px)}
+  .js-io .slide.from-r{transform:translateX(28px)}
+  .js-io .slide.in{opacity:1;transform:none;transition:opacity .5s ease-out,transform .5s cubic-bezier(.16,1,.3,1)}
 
-  @media(max-width:840px){
-    .hero-inner{grid-template-columns:1fr}
-    .nav-links{display:none}
-    .stats .row{grid-template-columns:repeat(2,1fr)}
-    .step{grid-template-columns:1fr;gap:10px}
-    .cap-grid{grid-template-columns:1fr}
-    .cap-cell.wide3,.cap-cell.wide2{grid-column:span 1}
-    .principles{grid-template-columns:1fr}
-    .duo{grid-template-columns:1fr}
-  }
   @media(prefers-reduced-motion:reduce){
     html{scroll-behavior:auto}
-    .reveal{opacity:1;transform:none;transition:none}
+    .slide,.slide.from-l,.slide.from-r{opacity:1;transform:none;transition:none}
+    .art-pane .photo{transition:none}
   }
 </style>
 </head>
 <body>
+<!-- THESIS: A composition you operate, in the language of De Stijl — the page is one continuous room of sliding planes, not a hero-with-cards. It refuses the category default of a dark tool landing with a feature grid. OWN-WORLD: white and gray planes on paper, black structural frame lines around every plane, red/yellow/blue rationed strictly to the edges that actually move (the CTA, the live frame demo, section joints). Lowercase geometric sans (Futura) set flush to plane edges; text blocks are rectangles in the composition; asymmetric balance ruled by primary-color joints. STORY: a frame owner understands their photos become a quiet rotating art wall that runs offline, is exact, and learns taste — and they can operate the composition (slide the art plane) to feel it. FIRST VIEWPORT: left column, lowercase headline with the three primary colors on key words, one-line lede, red CTA plane; right column, a live framed art plane with a slide control — the mechanism demonstrated at the scale it has in life. FORM: Rietveld sliding planes, position 5 of the grounded list, seed key 73dbfddf. FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md. -->
+<div class="frame-shell">
 
 <nav class="nav">
   <div class="wrap nav-inner">
-    <div class="brand">SamsungFrame&nbsp;Curator</div>
+    <div class="brand">samsungframe <b>curator</b></div>
     <div class="nav-links">
-      <a href="#workflow">Workflow</a>
-      <a href="#capabilities">Capabilities</a>
-      <a href="#taste">Taste Lens</a>
-      <a href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">GitHub ↗</a>
+      <a href="#how">how it works</a>
+      <a href="#why">why it's different</a>
+      <a href="#taste">taste lens</a>
+      <a href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">github ↗</a>
     </div>
   </div>
 </nav>
@@ -169,145 +217,120 @@
 <header class="hero">
   <div class="wrap hero-inner">
     <div>
-      <p class="kicker">Local-first studio · Air-gapped</p>
-      <h1>Your photos, <em>curated</em> for the Frame.</h1>
-      <p class="lede">A private studio that consolidates your library, finds its strongest images, and turns them into exact Frame-ready art. It never touches the network unless you say so.</p>
+      <h1>your photos,<br>curated for the <span class="yellow">frame.</span></h1>
+      <p class="lede">Curator is a private studio that cleans up your photo library, picks your best shots, and turns them into a quiet rotating art wall on your Samsung Frame. It runs offline, by default.</p>
       <div class="cta-row">
-        <a class="cta" href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">View on GitHub</a>
-        <a class="cta sec" href="#workflow">See what it does</a>
+        <a class="cta" href="#how">see how it works</a>
+        <a class="cta ghost" href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">github</a>
       </div>
     </div>
-    <figure class="frame reveal">
-      <div class="matte" role="img" aria-label="Abstract framed artwork placeholder"></div>
-      <figcaption><span>1920 × 1080</span><span>sRGB</span><span>exact</span></figcaption>
-    </figure>
+    <div class="stage slide from-r">
+      <div class="art-pane" aria-label="demo: your photos rotating on the frame">
+        <div class="photo p1"><div class="comp c1"><div class="b1"></div><div class="b2"></div><div class="b3"></div></div></div>
+        <div class="photo p2"><div class="comp c2"><div class="b1"></div><div class="b2"></div></div></div>
+        <div class="photo p2"><div class="comp c3"><div class="b1"></div></div></div>
+      </div>
+      <div class="stage-caption">
+        <span class="label">your photos, rotating</span>
+        <div class="stage-ctrl" role="group" aria-label="rotate demo artwork">
+          <button type="button" aria-label="previous artwork">‹</button>
+          <button type="button" aria-label="next artwork">›</button>
+        </div>
+      </div>
+    </div>
   </div>
 </header>
 
-<section class="stats" aria-label="project status">
+<section class="metrics" aria-label="project status">
   <div class="wrap">
     <div class="row">
-      <div class="stat"><b><span>27</span>/27</b><small>requirements validated</small></div>
-      <div class="stat"><b><span>634</span></b><small>automated tests</small></div>
-      <div class="stat"><b><span>8</span></b><small>acceptance files, air-gapped</small></div>
-      <div class="stat"><b><span>0</span></b><small>mandatory network calls</small></div>
+      <div class="metric"><b><span>27</span>/27</b><small>requirements done</small></div>
+      <div class="metric"><b><span>634</span></b><small>automated tests</small></div>
+      <div class="metric"><b><span>0</span></b><small>mandatory network calls</small></div>
+      <div class="metric"><b><span>1</span></b><small>canonical data root</small></div>
     </div>
   </div>
 </section>
 
-<section class="block" id="workflow">
+<section class="block" id="how">
   <div class="wrap">
-    <div class="sec-head reveal">
-      <h2>From a messy SSD to <em>living art.</em></h2>
-      <p class="sec-sub">Seven milestones, one guided pipeline. The catalog sits at the center; everything downstream trusts it.</p>
+    <div class="sec-head slide">
+      <h2>from a messy folder to a <span style="color:var(--red)">living wall.</span></h2>
+      <p class="sec-sub">Seven steps, one calm pipeline. Everything downstream trusts the catalog at the center.</p>
     </div>
-
-    <div class="step reveal"><span class="no">01</span><div class="body">
-      <h3>Consolidate, non-destructively</h3>
-      <p>Ingest local folders and NAS sources (HEIC, JPEG, PNG, WebP, TIFF), detect exact and perceptual duplicates with best-original recovery, and fold everything into one content-addressed store. Sources stay untouched until you approve archival.</p>
-      <div class="meta"><span>SHA-256</span><span>journaled</span><span>resumable</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">02</span><div class="body">
-      <h3>Analyze, offline and deterministically</h3>
-      <p>A provider-neutral engine scores technical and aesthetic quality, saliency and subjects, crop safety, color story, and pairing affinity. Every signal is computable on a CPU and reproducible run to run, and none of it needs a network.</p>
-      <div class="meta"><span>raw + corrupt reported</span><span>no cloud default</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">03</span><div class="body">
-      <h3>Direct the art direction</h3>
-      <p>A deterministic policy engine proposes treatments (full-bleed, contain-and-matte, panoramic, square, or diptych), each with a rationale, captured in a versioned ArtDirectionManifest with explicit target overrides.</p>
-      <div class="meta"><span>explainable</span><span>versioned</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">04</span><div class="body">
-      <h3>Render, then verify</h3>
-      <p>One manifest renders byte-identical output at 1080p, 4K, or any exact size in sRGB. A validator checks dimensions, profile, hash, region math, and that nothing was cropped unexpectedly. Upscaling is never silent.</p>
-      <div class="meta"><span>1080p / 4K / custom</span><span>validated</span><span>no silent upscale</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">05</span><div class="body">
-      <h3>Approve with history</h3>
-      <p>Per-image approve, reject, undo, redo, and batch, with append-only history and rationale. Drive it from a browser-based Darkroom Bench that is keyboard- and screen-reader-first, or from a headless CLI with stable exit codes.</p>
-      <div class="meta"><span>web UI</span><span>cli</span><span>WCAG AA</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">06</span><div class="body">
-      <h3>Publish to the frame, safely</h3>
-      <p>Filesystem, simulator, Samsung Art Mode (canary upload, exact-ID replace, rollback) and Home Assistant coordination behind an exclusive write lease. A durable watcher ingests new photos exactly once.</p>
-      <div class="meta"><span>leased</span><span>canary + rollback</span><span>ingest-once</span></div>
-    </div></div>
-
-    <div class="step reveal"><span class="no">07</span><div class="body">
-      <h3>Personalize with Taste Lens</h3>
-      <p>Versioned, isolated preference profiles rerank candidates with explainable deltas, tuned by active-learning pairwise comparisons. Disable it and you get the exact baseline back. Approved output never changes.</p>
-      <div class="meta"><span>reversible</span><span>measured</span><span>baseline-isolated</span></div>
-    </div></div>
+    <div class="pipe">
+      <div class="step slide"><span class="no">consolidate</span><div class="body"><h3>clean up your library, safely</h3><p>Import photos from folders and NAS drives. Find duplicates and near-duplicates, keep the best copy, and fold everything into one catalog. Your original files are never changed or deleted unless you ask.</p><div class="meta">heic · jpeg · png · webp · tiff</div></div></div>
+      <div class="step slide"><span class="no">analyze</span><div class="body"><h3>rank your photos, <em>offline</em></h3><p>An on-device engine scores every shot on sharpness, quality, composition, color, and what stands out. No cloud in the happy path.</p><div class="meta">raw + corrupt files reported, never dropped</div></div></div>
+      <div class="step slide"><span class="no">direct</span><div class="body"><h3>choose how each is shown</h3><p>It proposes a layout per photo — full-bleed, matted, panoramic, square, or a two-photo diptych — and says why. You can override any of it.</p><div class="meta">every choice explained</div></div></div>
+      <div class="step slide"><span class="no">render</span><div class="body"><h3>render, then verify</h3><p>One choice produces an exact 1080p or 4k image. Nothing is upscaled or cropped without you knowing, and every file is checked before it counts.</p><div class="meta">exact · verified · no silent upscale</div></div></div>
+      <div class="step slide"><span class="no">approve</span><div class="body"><h3>approve before it's used</h3><p>Approve, reject, undo, and batch-review from a simple browser app or the command line. Full history is kept, with your reasons.</p><div class="meta">web ui · cli · keyboard-first</div></div></div>
+      <div class="step slide"><span class="no">publish</span><div class="body"><h3>put it on the frame, safely</h3><p>Send approved art to the frame via Samsung Art Mode or Home Assistant, with backups and rollback if anything goes wrong. A watcher picks up new photos automatically.</p><div class="meta">filesystem · simulator · samsung · home assistant</div></div></div>
+      <div class="step slide"><span class="no">personalize</span><div class="body"><h3>let it learn your taste</h3><p>Taste Lens gently reorders suggestions to match you — explainable, tuned by comparing two photos, reversible with one click. Approved output never changes.</p><div class="meta">reversible · measured · baseline-isolated</div></div></div>
+    </div>
   </div>
 </section>
 
-<section class="block" id="capabilities" style="border-color:var(--hair)">
+<section class="block" id="why">
   <div class="wrap">
-    <div class="sec-head reveal">
-      <h2>Everything it does, <em>in one place.</em></h2>
-      <p class="sec-sub">Seven milestones of work, all of it local.</p>
+    <div class="sec-head slide">
+      <h2>why it's <span style="color:var(--blue)">different.</span></h2>
+      <p class="sec-sub">Everything below runs on your machine, unless you turn the cloud on yourself.</p>
     </div>
-    <div class="cap-grid">
-      <div class="cap-cell wide3 reveal"><h3>Content-addressed catalog</h3><p>SHA-256 identities keep duplicate references from creating duplicate work; connector-scoped source identity means renames, moves, and remote revisions never collide.</p><span class="idx">Catalog · system of record</span></div>
-      <div class="cap-cell reveal"><h3><em>Air-gapped</em> analysis</h3><p>Perceptual embeddings, quality, saliency, crop safety, and color. Computed offline, and reproducible run to run.</p><span class="idx">Analysis</span></div>
-      <div class="cap-cell wide2 reveal"><h3>Art direction + manifest</h3><p>Policy proposes treatments with rationale; explicit overrides win; one manifest drives rendering.</p><span class="idx">Art direction</span></div>
-      <div class="cap-cell wide2 ink reveal"><h3><em>Deterministic</em> renderer + validator</h3><p>Byte-identical 1080p/4K/custom sRGB from one manifest, checked by a validator that rejects a wrong dimension, profile, hash, or crop.</p><span class="idx">Render · verify</span></div>
-      <div class="cap-cell reveal"><h3>Web + headless</h3><p>A dependency-light Darkroom Bench UI plus a CLI with stable exit codes and JSON.</p><span class="idx">Interface</span></div>
-      <div class="cap-cell reveal"><h3>Watcher &amp; rotation</h3><p>Durable ingest of stabilized photos once; deterministic collections, intervals, seasons, and show-now.</p><span class="idx">Automation</span></div>
-      <div class="cap-cell wide3 reveal"><h3>Production plumbing</h3><p>A crash-safe job orchestrator with classified outcomes, packaging for macOS launchd and Docker, and a migration tool that imports a legacy Samsung SSD non-destructively. Backups happen before every mutation.</p><span class="idx">Orchestrator · migrate</span></div>
+    <div class="compo">
+      <div class="cell wide3 slide"><span class="tag">one safe home</span><h3>a catalog that knows every photo</h3><p>Each photo is identified by its exact content. Copies and duplicates don't create extra work, and renames never break things.</p><span class="idx">catalog · system of record</span></div>
+      <div class="cell slide"><span class="tag">private</span><h3>air-gapped by default</h3><p>No mandatory network calls for ingest, analysis, or a local publish.</p><span class="idx">privacy</span></div>
+      <div class="cell wide2 slide"><span class="tag">if you opt in</span><h3>cloud that tells the truth</h3><p>Plain disclosure of what leaves your machine, per-photo exclusions, and a cloud outage only pauses cloud work.</p><span class="idx">disclosure · exclusions</span></div>
+      <div class="cell wide2 blue slide"><span class="tag">deterministic</span><h3>same photos in, <em>same art out</em></h3><p>Rendering is exact and reproducible, and long jobs survive crashes and resume where they stopped.</p><span class="idx">render · verify · resume</span></div>
+      <div class="cell slide"><span class="tag">automation</span><h3>watcher + rotation</h3><p>New photos are picked up once; collections rotate with intervals, favorites, and seasons.</p><span class="idx">watch · rotate</span></div>
+      <div class="cell slide"><span class="tag">immich</span><h3>sync without deletions</h3><p>Import from Immich safely, checkpointed and idempotent. Optional feedback is off by default.</p><span class="idx">immich</span></div>
+      <div class="cell wide3 slide"><span class="tag">production ready</span><h3>easy to install and run</h3><p>Packaging for macOS and Docker, a prompt-free start, and a migration tool that imports an old Samsung SSD with backups first.</p><span class="idx">launchd · docker · migrate</span></div>
     </div>
   </div>
 </section>
 
 <section class="block" id="principles">
   <div class="wrap">
-    <div class="sec-head reveal">
-      <h2>Private by <em>construction.</em></h2>
-      <p class="sec-sub">Your originals, approvals, and TV credentials stay on your machine. Nothing leaves unless you turn it on, and only after you&rsquo;ve seen exactly what will.</p>
+    <div class="sec-head slide">
+      <h2>private by <span style="color:var(--yellow-ink)">construction.</span></h2>
+      <p class="sec-sub">Your originals, approvals, and TV credentials stay on your machine. Nothing leaves unless you turn it on, and only after you've seen exactly what will.</p>
     </div>
     <div class="principles">
-      <div class="principle reveal"><span class="pno">Default posture</span><h3>Air-gapped</h3><p>No mandatory network calls during ingest, analysis, proposal, render, or a local publish.</p></div>
-      <div class="principle reveal"><span class="pno">If you opt in</span><h3>Plain disclosure</h3><p>A plain-language statement lists exactly what leaves: downscaled derivatives and selected metadata, never originals, secrets, or TV credentials.</p></div>
-      <div class="principle reveal"><span class="pno">Your control</span><h3>Per-source exclusions</h3><p>Exclude full resolution, faces, GPS, or named folders before anything is ever sent.</p></div>
+      <div class="principle slide"><span class="pno">default posture</span><h3>air-gapped</h3><p>No mandatory network calls during ingest, analysis, proposal, render, or a local publish.</p></div>
+      <div class="principle slide"><span class="pno">if you opt in</span><h3>plain disclosure</h3><p>A plain-language statement lists exactly what leaves: downscaled derivatives and selected metadata, never originals, secrets, or TV credentials.</p></div>
+      <div class="principle slide"><span class="pno">your control</span><h3>per-source exclusions</h3><p>Exclude full resolution, faces, gps, or named folders before anything is ever sent.</p></div>
     </div>
   </div>
 </section>
 
 <section class="block" id="taste">
   <div class="wrap">
-    <div class="sec-head reveal">
-      <h2>Taste <em>Lens.</em></h2>
-      <p class="sec-sub">Added only after the baseline is trustworthy. It learns how you weigh the qualities the analysis engine already extracts, and it&rsquo;s reversible: turn it off and the ranking goes back to what it was. It comes in two parts, a lens that learns your eye and a discovery desk that brings you new work.</p>
+    <div class="sec-head slide">
+      <h2>taste <span style="color:var(--red)">lens.</span></h2>
+      <p class="sec-sub">Added only after the baseline is trustworthy. It learns how you weigh the qualities the engine already extracts, and it's reversible: turn it off and the ranking goes back to what it was. Two tools live under the name.</p>
     </div>
-
     <div class="duo">
-      <div class="panel reveal">
-        <span class="pmeta">The lens · your library</span>
-        <h3>Your eye, <em>made explicit.</em></h3>
-        <p>Taste Lens reranks your candidates and art-direction proposals the way you actually choose. Compare two photos and prefer one; the change lands as a small, explainable shift on top of the baseline order, and every move says why. This signal, this weight, this contribution.</p>        <ul class="dlist">
-          <li>Six isolated profile kinds: personal, household, room, season, guest-safe, experimental</li>
-          <li>Every ranking is the baseline plus a personal delta, with each contribution listed</li>
-          <li>Informative pairs are chosen first, and every lift is measured before it is promoted</li>
-          <li>Blend profiles, veto what you dislike, replay or undo any version</li>
-          <li>Turn it off and the exact baseline order returns; approved output stays byte-identical</li>
+      <div class="panel slide">
+        <span class="pmeta">the lens · your library</span>
+        <h3>your eye, <em>made explicit</em></h3>
+        <p>Reranks your candidates the way you actually choose. Compare two photos and prefer one; the change lands as a small, explainable shift on top of the baseline order, and every move says why. This signal, this weight, this contribution.</p>
+        <ul class="dlist">
+          <li>six isolated profile kinds: personal, household, room, season, guest-safe, experimental</li>
+          <li>every ranking is the baseline plus a personal delta, each contribution listed</li>
+          <li>informative pairs chosen first; every lift measured before it is promoted</li>
+          <li>blend profiles, veto what you dislike, replay or undo any version</li>
+          <li>turn it off and the exact baseline order returns; approved output stays byte-identical</li>
         </ul>
       </div>
-
-      <div class="panel ink reveal">
-        <span class="pmeta">Discovery · new work</span>
-        <h3>A wall of work <em>you haven&rsquo;t met.</em></h3>
-        <p>Taste Lens Discovery is a separate surface fed by a federated catalog of painters and photographers. The deck composes a feed in likely, adjacent, or wildcard modes, surfaces artist spotlights, and lets you lean the mix from familiar toward surprising. Compare two works and the result folds back into the same profile.</p>
+      <div class="panel blue slide">
+        <span class="pmeta">discovery · new work</span>
+        <h3>a wall of work <em>you haven't met</em></h3>
+        <p>A separate surface fed by a federated catalog of painters and photographers. The deck composes a feed in likely, adjacent, or wildcard modes, surfaces artist spotlights, and lets you lean from familiar toward surprising. Compare two works to calibrate.</p>
         <ul class="dlist">
-          <li>Federated and outage-isolated: a down source never breaks the deck</li>
-          <li>Likely / adjacent / wildcard feed, artist spotlights, a Familiar &harr; Surprising dial</li>
-          <li>Pairwise calibration keeps your training continuous across both tools</li>
-          <li>A denied creator is never surfaced or acted on; works stay signal-isolated</li>
-          <li>The same action returns the same result by gesture, button, or keyboard</li>
+          <li>federated and outage-isolated: a down source never breaks the deck</li>
+          <li>likely / adjacent / wildcard feed, artist spotlights, a familiar ↔ surprising dial</li>
+          <li>pairwise calibration keeps your training continuous across both tools</li>
+          <li>a denied creator is never surfaced or acted on; works stay signal-isolated</li>
+          <li>the same action returns the same result by gesture, button, or keyboard</li>
         </ul>
       </div>
     </div>
@@ -316,26 +339,48 @@
 
 <footer>
   <div class="wrap foot">
-    <span>© <span id="year">2026</span> SamsungFrame Curator · Local-first · Air-gapped by default.</span>
+    <span>© <span id="year">2026</span> samsungframe curator · local-first · air-gapped by default · <a href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">mit licensed</a></span>
     <div class="right">
-      <a href="#workflow">Workflow</a>
-      <a href="#taste">Taste Lens</a>
-      <a href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">GitHub ↗</a>
+      <a href="#how">how it works</a>
+      <a href="#taste">taste lens</a>
+      <a href="https://github.com/rohanpandula/samsungframe-curator" target="_blank" rel="noopener">github ↗</a>
     </div>
   </div>
 </footer>
 
+</div>
 <script>
-  (function(){
-    var y=document.getElementById('year');if(y)y.textContent=new Date().getFullYear();
-    if(window.matchMedia('(prefers-reduced-motion: reduce)').matches)return;
-    var els=document.querySelectorAll('.reveal');
-    if(!('IntersectionObserver' in window)){els.forEach(function(e){e.classList.add('in')});return;}
-    var io=new IntersectionObserver(function(es){
-      es.forEach(function(en){if(en.isIntersecting){en.target.classList.add('in');io.unobserve(en.target);}});
-    },{threshold:0.12});
-    els.forEach(function(e){io.observe(e)});
-  })();
+(function(){
+  var y=document.getElementById('year');if(y)y.textContent=new Date().getFullYear();
+
+  // live art plane: slide between De Stijl compositions
+  var pane=document.querySelector('.art-pane');
+  var photos=Array.prototype.slice.call(pane.querySelectorAll('.photo'));
+  var idx=0;
+  function show(i){
+    idx=(i+photos.length)%photos.length;
+    photos.forEach(function(p,k){
+      p.classList.remove('p1','p2');
+      p.classList.add(k===idx?'p1':'p2');
+    });
+  }
+  var btns=document.querySelectorAll('.stage-ctrl button');
+  if(btns.length===2){
+    btns[0].addEventListener('click',function(){show(idx-1)});
+    btns[1].addEventListener('click',function(){show(idx+1)});
+  }
+
+  // sliding reveals — progressive enhancement: only hide when IO is available
+  var reduce=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var els=document.querySelectorAll('.slide');
+  if(reduce||!els.length)return;
+  if(!('IntersectionObserver' in window))return; // leave everything visible
+  document.documentElement.classList.add('js-io');
+  var io=new IntersectionObserver(function(es){
+    es.forEach(function(en){if(en.isIntersecting){en.target.classList.add('in');io.unobserve(en.target);}});
+  },{threshold:0.12,rootMargin:'0px 0px -8% 0px'});
+  els.forEach(function(e){io.observe(e)});
+})();
 </script>
 </body>
 </html>
