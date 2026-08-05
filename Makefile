@@ -9,9 +9,10 @@ test:
 # Deterministic, air-gapped acceptance gate (S05 + M002/S04): the ingest /
 # connector contract scenarios plus the T3/T4 analysis -> propose -> manifest
 # lifecycle. Fails non-zero on any regression across ingest / analyize / propose /
-# manifest; later scenarios (scan/exit-codes, consolidation) are appended here.
+# manifest; later scenarios (scan/exit-codes, consolidation) are appended here,
+# through the M007 Taste Lens gate and the M008 Taste Dialogue gate (R032-R038).
 acceptance:
-	uv run pytest tests/test_acceptance.py tests/test_connector_contract.py tests/test_acceptance_analysis.py tests/test_acceptance_render.py tests/test_acceptance_webui.py tests/test_acceptance_adapters.py tests/test_acceptance_ops.py tests/test_acceptance_taste.py -q
+	uv run pytest tests/test_acceptance.py tests/test_connector_contract.py tests/test_acceptance_analysis.py tests/test_acceptance_render.py tests/test_acceptance_webui.py tests/test_acceptance_adapters.py tests/test_acceptance_ops.py tests/test_acceptance_taste.py tests/test_acceptance_taste_dialogue.py -q
 
 lint:
 	uv run ruff check .
