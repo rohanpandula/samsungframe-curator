@@ -46,9 +46,21 @@ from curator.taste.dialogue.retention import (
 )
 from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore, SessionStore
+from curator.taste.dialogue.upstream import (
+    CORROBORATING_WEIGHT,
+    ProfileCitation,
+    RankExplanation,
+    citations_for,
+    explain_rank,
+    familiar_surprising_dimensions,
+    pairing_rationale,
+    profile_dimensions,
+    profile_fit,
+)
 
 __all__ = [
     "CONTROLLED_VOCABULARY",
+    "CORROBORATING_WEIGHT",
     "CloudExtractionProvider",
     "ColdStartSeeder",
     "EvidenceRef",
@@ -63,16 +75,24 @@ __all__ = [
     "ObservationError",
     "Polarity",
     "ProfileBuilder",
+    "ProfileCitation",
     "ProfileEvent",
     "ProfileStore",
+    "RankExplanation",
     "SyntheticExtractionRuntime",
     "TasteClaim",
     "TasteObservation",
     "TasteProfile",
     "WhatILearned",
+    "citations_for",
     "create_observation",
+    "explain_rank",
     "extract_or_unavailable",
     "extraction_default_disclosure",
+    "familiar_surprising_dimensions",
+    "pairing_rationale",
+    "profile_dimensions",
+    "profile_fit",
     "resolve_extraction_provider",
     "retain_ephemeral",
     "retention_policy",
