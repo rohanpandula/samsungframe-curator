@@ -65,10 +65,10 @@
   .cta{
     display:inline-block;padding:13px 24px;background:var(--red);color:#fff;
     font-weight:600;font-size:15.5px;letter-spacing:.02em;border:2px solid var(--ink);
-    text-transform:lowercase;box-shadow:4px 4px 0 var(--ink);transition:transform .14s ease-out;
+    text-transform:lowercase;border:2px solid var(--ink);transition:transform .14s ease-out;
   }
   .cta:hover{transform:translate(1px,1px);border-bottom:2px solid var(--ink)}
-  .cta:active{transform:translate(3px,3px);box-shadow:1px 1px 0 var(--ink)}
+  .cta:active{transform:translate(2px,2px)}
   .cta.ghost{background:var(--paper);color:var(--ink);box-shadow:none}
   .cta.ghost:hover{background:var(--plane)}
 
@@ -90,7 +90,8 @@
   .comp.c2 .b1{position:absolute;left:0;bottom:0;width:100%;height:24%;background:var(--ink)}
   .comp.c2 .b2{position:absolute;right:12%;top:0;width:26%;height:100%;background:var(--red)}
   .comp.c3{background:var(--plane-2)}
-  .comp.c3 .b1{position:absolute;inset:0 0 0 0;background:radial-gradient(120% 100% at 70% 10%,var(--yellow),var(--red) 60%,var(--blue) 120%)}
+  .comp.c3 .b1{position:absolute;left:0;top:0;width:62%;height:100%;background:var(--blue)}
+  .comp.c3 .b2{position:absolute;right:0;bottom:0;width:38%;height:58%;background:var(--yellow)}
   .stage-caption{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 2px 2px}
   .stage-caption .label{font-size:12.5px;letter-spacing:.04em;color:var(--mute);text-transform:lowercase}
   .stage-ctrl{display:flex;gap:0;border:2px solid var(--ink)}
@@ -107,8 +108,7 @@
   .metrics .row{display:grid;grid-template-columns:repeat(4,1fr)}
   .metric{border-right:2px solid var(--ink);padding:22px 20px;background:var(--paper)}
   .metric:last-child{border-right:0}
-  .metric b{font-size:clamp(26px,3.4vw,40px);font-weight:600;letter-spacing:-.01em}
-  .metric b span{color:var(--red)}
+  .metric b{font-size:clamp(26px,3.4vw,40px);font-weight:600;letter-spacing:-.01em;color:var(--ink)}
   .metric small{display:block;font-size:13px;color:var(--mute);margin-top:2px;text-transform:lowercase}
   @media(max-width:760px){.metrics .row{grid-template-columns:repeat(2,1fr)}.metric:nth-child(2){border-right:0}}
 
@@ -143,13 +143,9 @@
   .cell .idx{margin-top:auto;padding-top:14px;font-size:11px;letter-spacing:.1em;color:var(--mute);text-transform:lowercase}
   .cell.wide3{grid-column:span 3}
   .cell.wide2{grid-column:span 2}
-  .cell.red{background:var(--red);color:#fff}
-  .cell.red .tag,.cell.red p,.cell.red .idx{color:rgba(255,255,255,.85)}
-  .cell.red h3 em{color:#ffe08a}
-  .cell.yellow{background:var(--yellow);color:var(--ink)}
-  .cell.yellow .tag,.cell.yellow p,.cell.yellow .idx{color:rgba(22,21,20,.78)}
-  .cell.blue{background:var(--blue);color:#fff}
-  .cell.blue .tag,.cell.blue p,.cell.blue .idx{color:rgba(255,255,255,.85)}
+  /* color lives on the joints, not the plane: a left edge marks the moving cell */
+  .cell.joint-blue{box-shadow:inset 8px 0 0 var(--blue)}
+  .cell.joint-yellow{box-shadow:inset 8px 0 0 var(--yellow)}
   .cell.ink{background:var(--ink);color:var(--paper)}
   .cell.ink .tag,.cell.ink p,.cell.ink .idx{color:rgba(247,246,242,.72)}
   @media(max-width:860px){.compo{grid-template-columns:1fr}.cell.wide3,.cell.wide2{grid-column:span 1}}
@@ -174,6 +170,7 @@
   .panel .dlist{list-style:none;margin:0;padding:0;border-top:2px solid var(--ink)}
   .panel .dlist li{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--ink);font-size:13.5px;color:var(--ink-soft)}
   .panel .dlist li::before{content:"";width:10px;height:10px;flex:0 0 auto;margin-top:6px;background:var(--yellow);border:1px solid var(--ink)}
+  .panel.blue{box-shadow:inset 8px 0 0 var(--blue)}
   .panel.blue h3 em{color:var(--blue)}
   .panel.blue .dlist li::before{background:var(--blue)}
   @media(max-width:760px){.duo{grid-template-columns:1fr}.panel{border-right:0;border-bottom:2px solid var(--ink)}.panel:last-child{border-bottom:0}}
@@ -217,7 +214,7 @@
 <header class="hero">
   <div class="wrap hero-inner">
     <div>
-      <h1>your photos,<br>curated for the <span class="yellow">frame.</span></h1>
+      <h1>your <span class="blue">photos,</span><br>curated for the <span class="red">frame.</span></h1>
       <p class="lede">Curator is a private studio that cleans up your photo library, picks your best shots, and turns them into a quiet rotating art wall on your Samsung Frame. It runs offline, by default.</p>
       <div class="cta-row">
         <a class="cta" href="#how">see how it works</a>
@@ -228,7 +225,7 @@
       <div class="art-pane" aria-label="demo: your photos rotating on the frame">
         <div class="photo p1"><div class="comp c1"><div class="b1"></div><div class="b2"></div><div class="b3"></div></div></div>
         <div class="photo p2"><div class="comp c2"><div class="b1"></div><div class="b2"></div></div></div>
-        <div class="photo p2"><div class="comp c3"><div class="b1"></div></div></div>
+        <div class="photo p2"><div class="comp c3"><div class="b1"></div><div class="b2"></div></div></div>
       </div>
       <div class="stage-caption">
         <span class="label">your photos, rotating</span>
@@ -280,7 +277,7 @@
       <div class="cell wide3 slide"><span class="tag">one safe home</span><h3>a catalog that knows every photo</h3><p>Each photo is identified by its exact content. Copies and duplicates don't create extra work, and renames never break things.</p><span class="idx">catalog · system of record</span></div>
       <div class="cell slide"><span class="tag">private</span><h3>air-gapped by default</h3><p>No mandatory network calls for ingest, analysis, or a local publish.</p><span class="idx">privacy</span></div>
       <div class="cell wide2 slide"><span class="tag">if you opt in</span><h3>cloud that tells the truth</h3><p>Plain disclosure of what leaves your machine, per-photo exclusions, and a cloud outage only pauses cloud work.</p><span class="idx">disclosure · exclusions</span></div>
-      <div class="cell wide2 blue slide"><span class="tag">deterministic</span><h3>same photos in, <em>same art out</em></h3><p>Rendering is exact and reproducible, and long jobs survive crashes and resume where they stopped.</p><span class="idx">render · verify · resume</span></div>
+      <div class="cell wide2 joint-blue slide"><span class="tag">deterministic</span><h3>same photos in, <em>same art out</em></h3><p>Rendering is exact and reproducible, and long jobs survive crashes and resume where they stopped.</p><span class="idx">render · verify · resume</span></div>
       <div class="cell slide"><span class="tag">automation</span><h3>watcher + rotation</h3><p>New photos are picked up once; collections rotate with intervals, favorites, and seasons.</p><span class="idx">watch · rotate</span></div>
       <div class="cell slide"><span class="tag">immich</span><h3>sync without deletions</h3><p>Import from Immich safely, checkpointed and idempotent. Optional feedback is off by default.</p><span class="idx">immich</span></div>
       <div class="cell wide3 slide"><span class="tag">production ready</span><h3>easy to install and run</h3><p>Packaging for macOS and Docker, a prompt-free start, and a migration tool that imports an old Samsung SSD with backups first.</p><span class="idx">launchd · docker · migrate</span></div>
