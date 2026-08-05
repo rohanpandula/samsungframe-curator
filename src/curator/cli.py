@@ -20,6 +20,11 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
 - ``curator validate FILE``   — gate a rendered artifact against expected provenance
                                (``--expected-sha`` + ``--target`` dims); exit 0 publishable /
                                1 not / 2 on read or parse error.
+- ``curator taste drop PATH... [--note TEXT]`` — open a reaction-room session over the
+                               dropped images: record one extracted reaction (``--note``,
+                               exit 0) or preview its deterministic probing questions
+                               (no ``--note``, exit 3). ``taste profile``/``dispute`` are
+                               stubs (exit 2) wired by S04.
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -33,6 +38,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 from curator import api as api_module
 from curator import db
@@ -58,6 +64,7 @@ from curator.artdirection.policy import (
     propose as policy_propose,
 )
 from curator.catalog import Catalog
+from curator.config import CuratorConfig
 from curator.connectors.local import LocalConnector
 from curator.consolidate import ConsolidationExecutor, ConsolidationPlan, build_plan
 from curator.content_store import ContentStore
@@ -68,6 +75,9 @@ from curator.ingest.report import IngestReport
 from curator.render.renderer import DeterministicRenderer, RenderError, RenderResult
 from curator.render.validate import ArtifactValidator, ValidationReport
 from curator.scan import ScanDiff, scan_connector
+from curator.taste.dialogue.extraction import resolve_extraction_provider
+from curator.taste.dialogue.observation import create_observation
+from curator.taste.dialogue.room import ReactionRoom
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
 # 3=no-change. Every subcommand returns one of these; ``main`` maps uncaught
@@ -295,6 +305,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     undo = review_sub.add_parser("undo", help="revert the latest decision on an asset")
     undo.add_argument("asset", help="path to the cataloged asset")
+
+    taste = sub.add_parser(
+        "taste", help="taste dialogue: reaction room, profile, disputes"
+    )
+    taste_sub = taste.add_subparsers(dest="taste_command", required=True)
+
+    drop = taste_sub.add_parser(
+        "drop",
+        help="record a reaction to dropped image(s), or preview probing questions",
+    )
+    drop.add_argument(
+        "paths",
+        nargs="+",
+        help="image path(s): a cataloged asset path or a third-party ephemeral file",
+    )
+    drop.add_argument(
+        "--note",
+        default=None,
+        help="reaction text in the user's own words; omit to preview probing questions",
+    )
+
+    taste_sub.add_parser(
+        "profile", help="print the taste profile (not yet implemented)"
+    )
+
+    dispute = taste_sub.add_parser(
+        "dispute", help="dispute a profile claim (not yet implemented)"
+    )
+    dispute.add_argument("claim_id", help="profile claim id to dispute")
 
     headless = sub.add_parser(
         "headless",
@@ -1147,6 +1186,72 @@ def _review_update(args: argparse.Namespace, catalog: Catalog) -> int:
     return EXIT_OK
 
 
+def _taste(args: argparse.Namespace) -> int:
+    """Route the taste group to its subcommand handler."""
+    if args.taste_command == "drop":
+        return _taste_drop(args)
+    if args.taste_command == "profile":
+        print("taste profile: not yet implemented (S04 wires this)")
+        return EXIT_FATAL
+    if args.taste_command == "dispute":
+        print(f"taste dispute {args.claim_id}: not yet implemented (S04 wires this)")
+        return EXIT_FATAL
+    return EXIT_FATAL
+
+
+def _taste_extraction_config() -> dict[str, Any] | None:
+    """Return the taste extraction provider config from env, or ``None`` when off.
+
+    Cloud extraction is opt-in: ``CURATOR_TASTE_EXTRACTION_ENABLED``
+    (``1``/``true``/``yes``/``on``) with ``CURATOR_TASTE_EXTRACTION_PROVIDER``
+    (``cloud``/``local``, default ``cloud``). The Reaction Room is unavailable when
+    nothing is enabled — it never degrades to keyword matching.
+    """
+    enabled = os.environ.get("CURATOR_TASTE_EXTRACTION_ENABLED", "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return None
+    provider = os.environ.get("CURATOR_TASTE_EXTRACTION_PROVIDER", "cloud").strip().lower()
+    return {"enabled": True, "provider": provider}
+
+
+def _taste_drop(args: argparse.Namespace) -> int:
+    """Record a reaction to dropped images, or preview probing questions.
+
+    Resolves each PATH as a cataloged asset or an ephemeral third-party file via
+    :class:`ReactionRoom`. With ``--note``, one session is opened, the reaction is
+    extracted and recorded, and the session is closed (exit 0). Without ``--note``
+    the room previews its deterministic probing questions and records nothing
+    (exit :data:`EXIT_NO_CHANGE`).
+    """
+    provider = resolve_extraction_provider(_taste_extraction_config())
+    data_root = CuratorConfig().data_root
+    catalog = Catalog()
+    try:
+        room = ReactionRoom(catalog, provider, data_root)
+        session = room.start(args.paths)
+        if args.note:
+            room.react(session, args.note)
+            count = room.finish(session)
+            label = "observation" if count == 1 else "observations"
+            print(
+                f"taste drop: recorded reaction ({count} {label} in session {session.id})"
+            )
+            return EXIT_OK
+        questions = room.generator.questions_for(
+            create_observation(session_id=session.id, verbatim="")
+        )
+        room.finish(session)
+        if not questions:
+            print("taste drop: no probing questions")
+        else:
+            print("taste drop: probing questions:")
+            for question in questions:
+                print(f"  - {question.text}")
+        return EXIT_NO_CHANGE
+    finally:
+        catalog.db.close()
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Route parsed args to the matching subcommand handler."""
     if args.command == "catalog":
@@ -1178,6 +1283,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _validate(args)
     if args.command == "review":
         return _review(args)
+    if args.command == "taste":
+        return _taste(args)
     if args.command == "headless":
         return _headless_start(args)
     # Unreachable given required subparsers; defensive fallback.
