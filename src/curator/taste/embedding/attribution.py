@@ -133,8 +133,18 @@ def find_exemplars(
 
     Never raises: returns ``[]`` when *liked_shas* is empty or none of them have a
     stored vector under *model_version* yet — an honest "no exemplars yet", not a crash.
+    A zero-norm *vector*, or a stored row that is itself a zero vector (IN-01 —
+    :meth:`~curator.taste.embedding.provider.OnnxEmbeddingProvider.embed` can
+    return one rather than dividing by zero at the source), has no meaningfully
+    defined cosine similarity — such rows are excluded before the division rather
+    than left to produce ``NaN`` (which :func:`numpy.argsort` would otherwise sort
+    as *greater than* any float, silently surfacing a ``NaN`` row as the *most*
+    similar exemplar).
     """
     if not liked_shas:
+        return []
+    vector_norm = float(np.linalg.norm(vector))
+    if vector_norm == 0.0:
         return []
     liked_set = set(liked_shas)
     shas, matrix = embedding_store.get_matrix(model_version)
@@ -143,9 +153,14 @@ def find_exemplars(
         return []
     filtered_shas = [shas[i] for i in keep]
     filtered_matrix = matrix[keep]
-    similarities = filtered_matrix @ vector / (
-        np.linalg.norm(filtered_matrix, axis=1) * np.linalg.norm(vector)
-    )
+    row_norms = np.linalg.norm(filtered_matrix, axis=1)
+    nonzero = row_norms > 0
+    if not np.any(nonzero):
+        return []
+    filtered_shas = [sha for sha, keep_row in zip(filtered_shas, nonzero) if keep_row]
+    filtered_matrix = filtered_matrix[nonzero]
+    row_norms = row_norms[nonzero]
+    similarities = (filtered_matrix @ vector) / (row_norms * vector_norm)
     order = np.argsort(similarities)[::-1][:top_k]
     return [
         ExemplarResult(

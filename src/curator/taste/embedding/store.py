@@ -129,12 +129,20 @@ def cosine_similarity(a: StoredEmbedding, b: StoredEmbedding) -> float:
     Raises :class:`EmbeddingVersionError` when *a* and *b* come from different
     ``model_version`` values — a mismatched pair never silently returns a
     plausible-but-meaningless float (T-09-07).
+
+    A zero-norm vector (IN-01 —
+    :meth:`~curator.taste.embedding.provider.OnnxEmbeddingProvider.embed` can
+    return one rather than dividing by zero at the source) has no meaningfully
+    defined direction to compare, so either side being zero-norm returns
+    ``0.0`` ("no similarity") rather than ``NaN`` from a zero-by-zero division.
     """
     if a.model_version != b.model_version:
         raise EmbeddingVersionError(
             f"cannot compare embeddings from different model versions: "
             f"{a.model_version!r} vs {b.model_version!r}"
         )
-    return float(
-        np.dot(a.vector, b.vector) / (np.linalg.norm(a.vector) * np.linalg.norm(b.vector))
-    )
+    norm_a = float(np.linalg.norm(a.vector))
+    norm_b = float(np.linalg.norm(b.vector))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(np.dot(a.vector, b.vector) / (norm_a * norm_b))

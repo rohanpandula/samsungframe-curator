@@ -232,3 +232,14 @@ def test_cosine_similarity_same_version_computes() -> None:
     b = StoredEmbedding(sha256="b" * 64, model_version="v1", dim=2, vector=v2, created_at="")
     assert cosine_similarity(a, b) == pytest.approx(0.0, abs=1e-6)
     assert cosine_similarity(a, a) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_cosine_similarity_zero_vector_returns_zero_not_nan() -> None:
+    """IN-01: a zero-norm vector on either side has no defined direction — must
+    return 0.0 ("no similarity"), never NaN from a zero-by-zero division."""
+    zero = np.zeros(2, dtype=np.float32)
+    v1 = np.array([1.0, 0.0], dtype=np.float32)
+    a = StoredEmbedding(sha256="a" * 64, model_version="v1", dim=2, vector=zero, created_at="")
+    b = StoredEmbedding(sha256="b" * 64, model_version="v1", dim=2, vector=v1, created_at="")
+    assert cosine_similarity(a, b) == 0.0
+    assert cosine_similarity(a, a) == 0.0

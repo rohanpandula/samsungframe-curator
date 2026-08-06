@@ -167,6 +167,51 @@ def test_find_exemplars_liked_sha_with_no_stored_vector_returns_empty_list(
 
 
 # ---------------------------------------------------------------------------
+# IN-01: zero-vector guard — no NaN "false positive" exemplar
+# ---------------------------------------------------------------------------
+
+
+def test_find_exemplars_zero_query_vector_returns_empty_list_not_nan(catalog: Catalog) -> None:
+    """A zero-norm *query* vector has no defined direction — must return ``[]``,
+    never a ``NaN``-similarity result (which ``numpy.argsort`` would otherwise
+    sort as the *most* similar, ahead of every real match)."""
+    store = EmbeddingStore(catalog)
+    liked_sha = "1" * 64
+    _register_content(catalog, liked_sha)
+    liked_vector = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    liked_vector[0] = 1.0
+    store.set(liked_sha, "v1", liked_vector)
+
+    query = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    assert find_exemplars(query, [liked_sha], {liked_sha: 1}, store, "v1") == []
+
+
+def test_find_exemplars_excludes_a_zero_stored_vector_not_nan(catalog: Catalog) -> None:
+    """A stored zero vector (``OnnxEmbeddingProvider.embed`` can legitimately
+    return one rather than dividing by zero at the source) must be excluded
+    before the division, never surfaced as a spurious ``NaN``-similarity "most
+    similar" result ahead of a real, non-zero match."""
+    store = EmbeddingStore(catalog)
+    zero_sha = "1" * 64
+    real_sha = "2" * 64
+    _register_content(catalog, zero_sha)
+    _register_content(catalog, real_sha)
+    store.set(zero_sha, "v1", np.zeros(EMBEDDING_DIM, dtype=np.float32))
+    real_vector = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    real_vector[0] = 1.0
+    store.set(real_sha, "v1", real_vector)
+
+    query = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    query[0] = 1.0
+    results = find_exemplars(
+        query, [zero_sha, real_sha], {zero_sha: 1, real_sha: 2}, store, "v1"
+    )
+    assert results
+    assert all(r.sha256 != zero_sha for r in results)
+    assert all(not np.isnan(r.similarity) for r in results)
+
+
+# ---------------------------------------------------------------------------
 # render_rationale: deterministic template, never free text
 # ---------------------------------------------------------------------------
 
