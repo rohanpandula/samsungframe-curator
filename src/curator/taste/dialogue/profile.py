@@ -54,6 +54,12 @@ _NO_VERBATIM = "(no verbatim — inferred from history)"
 #: History sources, in the order their claims are emitted.
 _HISTORY_SOURCES: tuple[str, ...] = ("approval", "pairwise")
 
+#: Signals that are aliases of another signal and so would produce a duplicate
+#: claim. ``vibrancy`` is defined as the color-story colorfulness value (see
+#: :meth:`~curator.taste.rank.TasteRanker.signal_values`), so a cold start that
+#: scored both emitted two word-for-word identical claims per source.
+_ALIASED_SIGNALS: frozenset[str] = frozenset({"vibrancy"})
+
 _HISTORY_LABELS: dict[str, str] = {
     "approval": "approval history",
     "pairwise": "pairwise voting history",
@@ -689,8 +695,10 @@ class ColdStartSeeder:
 
     A claim is emitted when the liked entries' mean value for an M002 signal
     separates from its contrast set (the disliked entries, else the neutral
-    0.5 midpoint) by at least :data:`_MIN_SIGNAL_LEAN`. Reads only; nothing is
-    written until :meth:`seed`'s result is applied by the caller.
+    0.5 midpoint) by at least :data:`_MIN_SIGNAL_LEAN`. Signals that merely
+    alias another (:data:`_ALIASED_SIGNALS`) are skipped so the profile never
+    states the same thing twice. Reads only; nothing is written until
+    :meth:`seed`'s result is applied by the caller.
     """
 
     def __init__(self, db: sqlite3.Connection | Catalog) -> None:
@@ -831,6 +839,8 @@ class ColdStartSeeder:
             return []
         claims: list[TasteClaim] = []
         for signal in SIGNAL_NAMES:
+            if signal in _ALIASED_SIGNALS:
+                continue
             liked_mean = _mean([signals[d.catalog_entry_id][signal] for d in liked])
             baseline = (
                 _mean([signals[d.catalog_entry_id][signal] for d in contrast])

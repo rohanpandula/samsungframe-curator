@@ -639,6 +639,19 @@ def test_seed_labels_low_and_high_provenance_with_high_first(data_root):
     assert any("seeded" in e["summary"] for e in seeded.evolution)
 
 
+def test_seeder_states_each_lean_once(data_root):
+    """vibrancy aliases colorfulness — the profile must not say it twice."""
+    catalog = _seed_history(
+        data_root, approvals=_APPROVED_HISTORY, preferences=[(1, 1, ""), (2, 1, "")]
+    )
+    claims = ColdStartSeeder(catalog).claims()
+
+    assert "history:approval:colorfulness" in {c.id for c in claims}
+    assert not any(c.id.endswith(":vibrancy") for c in claims)
+    # No two claims say the same thing.
+    assert len({c.text for c in claims}) == len(claims)
+
+
 def test_seeder_is_deterministic(data_root):
     catalog = _seed_history(
         data_root, approvals=_APPROVED_HISTORY, preferences=[(1, 1, ""), (2, 1, "")]
