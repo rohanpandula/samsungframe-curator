@@ -164,7 +164,6 @@ from curator.taste.embedding.compare import (
     compare_heads,
 )
 from curator.taste.embedding.head import (
-    EmbeddingHead,
     VoteVectors,
     fit_embedding_head,
     resolve_vote_vectors,
@@ -1715,16 +1714,13 @@ def _taste_embedding_head(args: argparse.Namespace) -> int:
         head = fit_embedding_head(vote_vectors, EMBEDDING_MODEL_VERSION)
     finally:
         catalog.db.close()
-    zero_head = EmbeddingHead(
-        model_version=EMBEDDING_MODEL_VERSION,
-        dim=EMBEDDING_DIM,
-        vote_terms=(),
-        alpha=0.0,
-        capacity=0,
-        created_at="",
-        updated_at="",
+    # WR-05: exercise the real fit_embedding_head([]) zero-vote branch — not a
+    # hand-rolled EmbeddingHead(vote_terms=(), ...) stand-in, which bypassed
+    # fit_embedding_head entirely and was guaranteed 0.0 by score()'s own first
+    # branch regardless of what fit_embedding_head's zero-vote path actually did.
+    zero_check = fit_embedding_head([], EMBEDDING_MODEL_VERSION).score(
+        np.random.RandomState(0).rand(EMBEDDING_DIM).astype(np.float32)
     )
-    zero_check = zero_head.score(np.random.RandomState(0).rand(EMBEDDING_DIM).astype(np.float32))
     direction_norm = float(np.linalg.norm(head.effective_direction()))
     result: dict[str, Any] = {
         "ok": True,
