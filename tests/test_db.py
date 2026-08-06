@@ -301,3 +301,67 @@ def test_upgrade_from_v15_to_v16(data_root):
         assert "retracted_at" in cols
     finally:
         conn.close()
+
+
+def test_migration_v17_creates_content_embeddings_table(dbase):
+    """v17 creates content_embeddings — the first BLOB column in this schema (M009/S02)."""
+    assert "content_embeddings" in db.table_names(dbase)
+
+
+def test_migration_v17_content_embeddings_columns(dbase):
+    """content_embeddings has the exact sha256/model_version/dim/vector/created_at shape."""
+    cols = {r[1] for r in dbase.execute("PRAGMA table_info(content_embeddings)")}
+    for name in ("sha256", "model_version", "dim", "vector", "created_at"):
+        assert name in cols, f"missing v17 column {name}"
+
+
+def test_migration_v17_primary_key_is_sha_and_model_version(dbase):
+    """PRIMARY KEY(sha256, model_version) — a model upgrade appends, never collides."""
+    pk_cols = {
+        r[1] for r in dbase.execute("PRAGMA table_info(content_embeddings)") if r[5] > 0
+    }
+    assert pk_cols == {"sha256", "model_version"}
+
+
+def test_migration_v17_vector_is_blob_type(dbase):
+    """vector is declared BLOB — the first BLOB column in this schema."""
+    cols = {r[1]: r[2] for r in dbase.execute("PRAGMA table_info(content_embeddings)")}
+    assert cols["vector"] == "BLOB"
+
+
+def test_content_embeddings_cascade_deletes_with_content(dbase):
+    """Deleting the content row cascades to its embeddings (FK ON DELETE CASCADE)."""
+    sha = "e" * 64
+    dbase.execute("INSERT INTO content(sha256, size) VALUES (?, ?)", (sha, 100))
+    dbase.execute(
+        "INSERT INTO content_embeddings(sha256, model_version, dim, vector)"
+        " VALUES (?, 'v1', 2, ?)",
+        (sha, b"\x00\x00\x00\x00\x00\x00\x00\x00"),
+    )
+    dbase.commit()
+    dbase.execute("DELETE FROM content WHERE sha256 = ?", (sha,))
+    dbase.commit()
+    remaining = dbase.execute(
+        "SELECT COUNT(*) FROM content_embeddings WHERE sha256 = ?", (sha,)
+    ).fetchone()[0]
+    assert remaining == 0
+
+
+def test_upgrade_from_v16_to_v17(data_root):
+    """A v16-only DB upgrades in place to v17 via the linear migration runner."""
+    conn = db.connect()
+    try:
+        # Force a v16-only database: apply migrations 1-16 and pin user_version to 16.
+        for _version, ddl in schema.MIGRATIONS[:16]:
+            conn.executescript(ddl)
+        conn.execute("PRAGMA user_version = 16")
+        conn.commit()
+        tables_before = db.table_names(conn)
+        assert "content_embeddings" not in tables_before
+
+        db.migrate(conn)
+
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+        assert "content_embeddings" in db.table_names(conn)
+    finally:
+        conn.close()
