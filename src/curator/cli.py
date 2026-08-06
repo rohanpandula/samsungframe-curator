@@ -71,6 +71,18 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                saliency map, no LLM narration. ``ok=False``
                                reports cleanly (``EXIT_NO_CHANGE``) when no
                                model is available, same as ``embedding-head``.
+- ``curator taste compare [--json]`` — compare the lens and embedding heads
+                               over recorded votes, with uncertainty (M009/S05):
+                               held-out accuracy + promotion-gate result for
+                               each head independently, a discordant-pairs
+                               head-to-head accuracy with a 95% confidence
+                               interval, a learning curve, and a verdict of
+                               ``embedding_better``/``lens_better``/``tie``/
+                               ``insufficient_evidence`` — never a coin-flip
+                               winner, never a path that retires the lens
+                               head. ``EXIT_NO_CHANGE`` when the embedding
+                               provider is unavailable or fewer than two
+                               analyzed candidates exist yet.
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -85,6 +97,7 @@ import os
 import re
 import shutil
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -145,8 +158,14 @@ from curator.taste.dialogue.room import ReactionRoom
 from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore
 from curator.taste.embedding.attribution import attribute_score, find_exemplars, render_rationale
+from curator.taste.embedding.compare import (
+    HELD_OUT_FRACTION,
+    MIN_DISCORDANT_PAIRS,
+    compare_heads,
+)
 from curator.taste.embedding.head import (
     EmbeddingHead,
+    VoteVectors,
     fit_embedding_head,
     resolve_vote_vectors,
 )
@@ -156,7 +175,9 @@ from curator.taste.embedding.provider import (
     OnnxEmbeddingProvider,
 )
 from curator.taste.embedding.store import EmbeddingStore
-from curator.taste.store import TasteVoteStore, VoteRecord, next_pair
+from curator.taste.pairwise import Scorer
+from curator.taste.rank import TasteRanker
+from curator.taste.store import TasteVoteStore, VoteRecord, next_pair, resolve_vote_candidates
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
 # 3=no-change. Every subcommand returns one of these; ``main`` maps uncaught
@@ -517,6 +538,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the explanation as JSON",
+    )
+
+    compare = taste_sub.add_parser(
+        "compare",
+        help="compare the lens and embedding heads over recorded votes, with "
+        "uncertainty (M009/S05)",
+    )
+    compare.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the comparison report as JSON",
     )
 
     headless = sub.add_parser(
@@ -1390,6 +1422,8 @@ def _taste(args: argparse.Namespace) -> int:
         return _taste_embedding_head(args)
     if args.taste_command == "embedding-explain":
         return _taste_embedding_explain(args)
+    if args.taste_command == "compare":
+        return _taste_compare(args)
     return EXIT_FATAL
 
 
@@ -1841,6 +1875,180 @@ def _taste_embedding_explain(args: argparse.Namespace) -> int:
                 print(f"    {e.sha256[:12]} (entry {e.entry_id}, similarity {e.similarity:.3f})")
         else:
             print("  exemplars: (none yet)")
+    return EXIT_OK
+
+
+def _taste_compare_vector_by_asset_id(
+    catalog: Catalog,
+    candidates: list[dict[str, Any]],
+    analysis_map: dict[str, AnalysisResult],
+    embedding_store: EmbeddingStore,
+    model_version: str,
+) -> dict[str, np.ndarray]:
+    """Return ``{analysis.asset_id: vector}`` for every candidate with a stored embedding.
+
+    A candidate lacking a stored vector under *model_version* is simply absent
+    — the comparison's embedding scorer (see
+    ``_taste_compare_embedding_scorer_factory``) treats a missing entry as
+    ``0.0`` (no evidence), never a crash, mirroring the zero-vote/no-evidence
+    posture the rest of this subsystem already uses.
+    """
+    entry_ids = [int(c["id"]) for c in candidates]
+    if not entry_ids:
+        return {}
+    placeholders = ",".join("?" for _ in entry_ids)
+    rows = catalog.db.execute(
+        f"SELECT id, sha256 FROM catalog_entries WHERE id IN ({placeholders})",
+        entry_ids,
+    ).fetchall()
+    sha_by_entry_id = {int(entry_id): str(sha) for entry_id, sha in rows}
+    vector_by_asset_id: dict[str, np.ndarray] = {}
+    for cid, analysis in analysis_map.items():
+        sha = sha_by_entry_id.get(int(cid))
+        if sha is None:
+            continue
+        stored = embedding_store.get(sha, model_version)
+        if stored is not None:
+            vector_by_asset_id[analysis.asset_id] = stored.vector
+    return vector_by_asset_id
+
+
+def _taste_compare_embedding_scorer_factory(
+    vector_by_asset_id: dict[str, np.ndarray], model_version: str
+) -> Callable[[Sequence[VoteVectors]], Scorer]:
+    """Return a ``training-votes-subset -> Scorer`` factory for ``compare_heads``.
+
+    Refits :func:`~curator.taste.embedding.head.fit_embedding_head` fresh for
+    whichever vote subset it is called with — the full training set, or one of
+    ``compare_heads``'s learning-curve checkpoints — so ``compare.py`` itself
+    never needs to know about ``EmbeddingStore``/``model_version`` (it stays a
+    pure statistics module).
+    """
+
+    def factory(votes_subset: Sequence[VoteVectors]) -> Scorer:
+        head = fit_embedding_head(votes_subset, model_version)
+
+        def scorer(analysis: AnalysisResult) -> float:
+            vector = vector_by_asset_id.get(analysis.asset_id)
+            return head.score(vector) if vector is not None else 0.0
+
+        return scorer
+
+    return factory
+
+
+def _taste_compare(args: argparse.Namespace) -> int:
+    """Compare the lens and embedding heads over recorded votes, with uncertainty.
+
+    Splits the non-retracted vote history into training/held-out
+    (:data:`~curator.taste.embedding.compare.HELD_OUT_FRACTION`, most-recent
+    votes held out — deterministic, chronological), fits the lens scorer over
+    the current persisted profile and the embedding scorer fresh over the
+    training votes, evaluates both against the held-out set via
+    :func:`~curator.taste.embedding.compare.compare_heads`, and prints the full
+    report. Mirrors ``embedding-head``/``embedding-explain``'s availability
+    gate: ``ok=False`` -> :data:`EXIT_NO_CHANGE`. Also exits
+    :data:`EXIT_NO_CHANGE` when fewer than two analyzed candidates exist yet —
+    nothing to compare, not a failure.
+    """
+    provider = OnnxEmbeddingProvider()
+    probe = provider.probe()
+    if not probe.ok:
+        if args.json:
+            print(
+                json.dumps(
+                    {"ok": False, "backend": probe.backend.value, "message": probe.message},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"taste compare: ok=False backend={probe.backend.value}")
+            print(f"  {probe.message}")
+        return EXIT_NO_CHANGE
+    catalog = Catalog()
+    try:
+        candidates, analysis_map = resolve_vote_candidates(catalog)
+        if len(candidates) < 2:
+            print("taste compare: fewer than two analyzed candidates — nothing to compare yet")
+            return EXIT_NO_CHANGE
+        all_votes = [v for v in TasteVoteStore(catalog).votes() if not v.retracted]
+        n_held_out = max(1, round(len(all_votes) * HELD_OUT_FRACTION))
+        split_index = len(all_votes) - n_held_out
+        training_records = all_votes[:split_index]
+        held_out_records = all_votes[split_index:]
+        # A held-out vote's winner/loser must still be a current analyzed
+        # candidate — a vote can outlive its entry's analysis (re-analysis,
+        # deletion); skip rather than KeyError deep inside evaluate().
+        analyzed_ids = set(analysis_map)
+        held_out_pairs = [
+            (str(v.winner_entry_id), str(v.loser_entry_id), str(v.winner_entry_id))
+            for v in held_out_records
+            if str(v.winner_entry_id) in analyzed_ids and str(v.loser_entry_id) in analyzed_ids
+        ]
+        embedding_store = EmbeddingStore(catalog)
+        training_votes = resolve_vote_vectors(
+            training_records, embedding_store, provider.model_version
+        )
+        vector_by_asset_id = _taste_compare_vector_by_asset_id(
+            catalog, candidates, analysis_map, embedding_store, provider.model_version
+        )
+        current_profile = TasteVoteStore(catalog).load_profile()
+        ranker = TasteRanker()
+
+        def lens_scorer(analysis: AnalysisResult) -> float:
+            return ranker.personal_delta(analysis, current_profile)[0]
+
+        def baseline_scorer(analysis: AnalysisResult) -> float:
+            return 0.0
+
+        embedding_scorer_factory = _taste_compare_embedding_scorer_factory(
+            vector_by_asset_id, provider.model_version
+        )
+        comparison = compare_heads(
+            training_votes,
+            held_out_pairs,
+            candidates,
+            analysis_map,
+            lens_scorer,
+            embedding_scorer_factory,
+            baseline_scorer,
+        )
+    finally:
+        catalog.db.close()
+    result = comparison.to_dict()
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"taste compare: verdict={comparison.verdict}")
+        print(
+            f"  lens:      held_out_accuracy={comparison.lens_evidence.held_out_accuracy:.3f}"
+            f" promoted={comparison.lens_promoted}"
+        )
+        print(
+            f"  embedding: held_out_accuracy={comparison.embedding_evidence.held_out_accuracy:.3f}"
+            f" promoted={comparison.embedding_promoted}"
+        )
+        print(
+            f"  discordant pairs: {comparison.discordant_pairs}"
+            f" (embedding correct on {comparison.discordant_correct_embedding})"
+        )
+        if comparison.head_to_head_accuracy is not None and comparison.head_to_head_ci is not None:
+            lo, hi = comparison.head_to_head_ci
+            print(
+                f"  head-to-head accuracy: {comparison.head_to_head_accuracy:.3f}"
+                f" (95% CI [{lo:.3f}, {hi:.3f}])"
+            )
+        else:
+            print(
+                "  head-to-head accuracy: insufficient evidence"
+                f" (< {MIN_DISCORDANT_PAIRS} discordant pairs)"
+            )
+        print("  learning curve:")
+        for point in comparison.learning_curve:
+            print(
+                f"    votes={point['votes']}"
+                f" embedding_held_out_accuracy={point['embedding_held_out_accuracy']:.3f}"
+            )
     return EXIT_OK
 
 
