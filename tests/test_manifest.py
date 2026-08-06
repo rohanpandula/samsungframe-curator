@@ -7,6 +7,8 @@ import json
 import pytest
 
 from curator.artdirection.manifest import (
+    MAX_LAYOUT_SOURCES,
+    MULTI_CELL_TREATMENTS,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
@@ -19,6 +21,8 @@ from curator.artdirection.manifest import (
 def full_manifest() -> ArtDirectionManifest:
     return ArtDirectionManifest(
         sources=["abc123", "def456"],
+        # These x/y/w/h values assert JSON round-tripping only; they make no claim
+        # about the coordinate space, which is output-canvas pixels (M010/S01, N1).
         regions=[
             SourceRegion(source_sha256="abc123", x=0.1, y=0.2, w=0.5, h=0.4, crop="center"),
             SourceRegion(source_sha256="def456"),
@@ -105,3 +109,75 @@ def test_empty_optional_fields_roundtrip() -> None:
     assert rt.sources == []
     assert rt.pairing_order == []
     assert rt.target_overrides == {}
+
+
+# -- M010/S01: coordinate space, the unset sentinel, and the N invariants ------
+
+
+def test_region_count_mismatch_raises() -> None:
+    """regions populated but shorter than sources is rejected (was silent)."""
+    m = ArtDirectionManifest(
+        sources=["a", "b", "c"], regions=[SourceRegion(source_sha256="a")]
+    )
+    with pytest.raises(ManifestError) as exc:
+        m.validate()
+    assert "one region per source" in str(exc.value)
+    assert "3 source(s) but 1 region(s)" in str(exc.value)
+
+
+def test_region_referencing_unknown_source_raises() -> None:
+    """A region naming a sha absent from sources is rejected (was silent)."""
+    m = ArtDirectionManifest(
+        sources=["a"], regions=[SourceRegion(source_sha256="deadbeef")]
+    )
+    with pytest.raises(ManifestError) as exc:
+        m.validate()
+    assert "not in manifest" in str(exc.value)
+    assert "deadbeef" in str(exc.value)
+
+
+def test_over_cap_source_count_raises() -> None:
+    """More than MAX_LAYOUT_SOURCES sources is rejected, never truncated."""
+    m = ArtDirectionManifest(sources=[str(i) for i in range(MAX_LAYOUT_SOURCES + 1)])
+    with pytest.raises(ManifestError) as exc:
+        m.validate()
+    assert str(MAX_LAYOUT_SOURCES) in str(exc.value)
+    assert "never truncated" in str(exc.value)
+
+
+def test_source_count_at_cap_validates() -> None:
+    """Exactly MAX_LAYOUT_SOURCES sources is allowed; the cap is inclusive."""
+    shas = [str(i) for i in range(MAX_LAYOUT_SOURCES)]
+    ArtDirectionManifest(sources=shas).validate()
+    assert len(shas) == 9
+
+
+def test_all_zero_regions_still_validate() -> None:
+    """Legacy manifests (every region all-zero == unset) keep validating."""
+    shas = ["a", "b"]
+    m = ArtDirectionManifest(
+        sources=shas, regions=[SourceRegion(source_sha256=s) for s in shas]
+    )
+    m.validate()
+    assert all(r.is_unset for r in m.regions)
+
+
+def test_is_unset_distinguishes_declared_geometry() -> None:
+    """All-zero means 'no geometry declared'; any non-zero extent means set."""
+    assert SourceRegion(source_sha256="a").is_unset is True
+    assert SourceRegion(source_sha256="a", w=10).is_unset is False
+    assert SourceRegion(source_sha256="a", x=0, y=0, w=1920, h=1080).is_unset is False
+
+
+def test_is_unset_is_not_serialized() -> None:
+    """is_unset is a property, so to_dict / from_dict are untouched by it."""
+    region = SourceRegion(source_sha256="a", x=0, y=0, w=1920, h=1080)
+    data = region.to_dict()
+    assert "is_unset" not in data
+    assert SourceRegion.from_dict(data) == region
+
+
+def test_multi_cell_treatments_names_diptych_today() -> None:
+    """The single place 'does this treatment need >1 cell' is answered."""
+    assert LayoutTreatment.DIPTYCH in MULTI_CELL_TREATMENTS
+    assert LayoutTreatment.SINGLE_FULLBLEED not in MULTI_CELL_TREATMENTS

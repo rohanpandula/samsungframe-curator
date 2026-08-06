@@ -41,10 +41,42 @@ class LayoutTreatment(Enum):
 
 _NESTED_DICT_FIELDS = {"background", "processing_intent"}
 
+#: Maximum number of sources a single manifest may lay out (M010/S01).
+#:
+#: A **stated, revisable engineering default** (01-ROADMAP.md's "stated,
+#: revisable engineering default" decision), *not* a researched legibility
+#: ceiling — no source gives a real upper bound on how many images stay readable
+#: on one frame. Over-cap manifests are rejected by
+#: :meth:`ArtDirectionManifest.validate`, never silently truncated, and because
+#: ``DeterministicRenderer._render`` calls ``validate()`` as its first statement
+#: the cap fires before any image is decoded.
+MAX_LAYOUT_SOURCES = 9
+
+#: Treatments that occupy more than one cell of the output canvas (M010/S01).
+#:
+#: The single place the "does this treatment need more than one cell?" question
+#: is answered. Only :attr:`LayoutTreatment.DIPTYCH` qualifies today; M010/S02
+#: and M010/S03 extend this set as named N-up templates land.
+MULTI_CELL_TREATMENTS: frozenset[LayoutTreatment] = frozenset({LayoutTreatment.DIPTYCH})
+
 
 @dataclass(frozen=True)
 class SourceRegion:
-    """A normalized source region used as art, keyed by content identity."""
+    """One source's cell on the output canvas, keyed by content identity.
+
+    ``x`` / ``y`` / ``w`` / ``h`` are **output-canvas pixels** of the render
+    target the manifest was materialized against (M010/S01) — floats for schema
+    compatibility, but pixel counts, never fractions of the canvas. That is the
+    unit its only reader already assumes (``ArtifactValidator`` compares these
+    against the target dims) and the unit the renderer's paste box
+    ``(bx, by, bw, bh)`` is expressed in, so a region is a paste box without
+    conversion.
+
+    An **all-zero** region (``x == y == w == h == 0.0``) means *unset — no
+    geometry declared*, never "a zero-sized cell"; see :attr:`is_unset`. Every
+    manifest persisted before M010 carries all-zero regions, so this reading is
+    what keeps that history valid.
+    """
 
     source_sha256: str
     x: float = 0.0
@@ -52,6 +84,17 @@ class SourceRegion:
     w: float = 0.0
     h: float = 0.0
     crop: str | None = None
+
+    @property
+    def is_unset(self) -> bool:
+        """True when this region declares no geometry (x, y, w and h all zero).
+
+        Deliberately a property and never a field: :func:`_to_plain` walks
+        ``dataclasses.fields``, so a property stays invisible to
+        :meth:`to_dict` / :meth:`from_dict` and the persisted schema is
+        unchanged (M010/S01).
+        """
+        return self.x == 0.0 and self.y == 0.0 and self.w == 0.0 and self.h == 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return _to_plain(self)
@@ -127,8 +170,15 @@ class ArtDirectionManifest:
         """Check internal invariants, raising :class:`ManifestError` on failure.
 
         Enforces a current ``manifest_version``, a valid ``layout_treatment``,
-        and string-keyed ``target_overrides``. Unknown *override* fields are
-        rejected later by :meth:`resolved_for`.
+        and string-keyed ``target_overrides``. M010/S01 adds three N-source
+        invariants, all of which used to pass silently: the
+        :data:`MAX_LAYOUT_SOURCES` cap, one region per source whenever
+        ``regions`` is populated, and every region referencing a sha that is
+        actually in ``sources``. Regions are deliberately *not* required to be
+        uniformly set or uniformly unset — resolving a partially-populated
+        manifest is render-time work (``packing.resolve_regions``), not a data
+        model rule. Unknown *override* fields are rejected later by
+        :meth:`resolved_for`.
         """
         if str(self.manifest_version) != MANIFEST_VERSION:
             raise ManifestError(
@@ -141,6 +191,23 @@ class ArtDirectionManifest:
             )
         if not self.sources:
             raise ManifestError("manifest requires at least one source sha")
+        if len(self.sources) > MAX_LAYOUT_SOURCES:
+            raise ManifestError(
+                f"manifest has {len(self.sources)} source(s), over the "
+                f"{MAX_LAYOUT_SOURCES}-source layout cap — an over-cap request is "
+                f"rejected, never truncated"
+            )
+        if self.regions:
+            if len(self.regions) != len(self.sources):
+                raise ManifestError(
+                    f"manifest has {len(self.sources)} source(s) but "
+                    f"{len(self.regions)} region(s) — one region per source is required"
+                )
+            unknown = sorted({r.source_sha256 for r in self.regions} - set(self.sources))
+            if unknown:
+                raise ManifestError(
+                    f"region references source(s) not in manifest: {unknown}"
+                )
         for target, overrides in self.target_overrides.items():
             if not isinstance(target, str):
                 raise ManifestError(
