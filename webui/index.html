@@ -170,6 +170,25 @@
           <ol id="taste-evolution" class="taste-evolution"></ol>
         </section>
       </section>
+
+      <section id="taste-deck" class="panel" aria-labelledby="taste-deck-heading">
+        <h2 id="taste-deck-heading">Taste Deck</h2>
+        <p id="taste-deck-empty" class="empty">
+          Not enough analyzed images yet to compare — analyze at least two.
+        </p>
+        <div id="taste-deck-body" hidden>
+          <p class="muted">Which do you prefer?</p>
+          <div class="taste-pair">
+            <div class="pair-candidate" id="taste-deck-a">—</div>
+            <div class="pair-candidate" id="taste-deck-b">—</div>
+          </div>
+          <div class="pair-buttons">
+            <button type="button" id="taste-prefer-a" class="btn primary">Prefer A</button>
+            <button type="button" id="taste-prefer-b" class="btn primary">Prefer B</button>
+          </div>
+        </div>
+        <p id="taste-deck-status" class="status-text muted" role="status" aria-live="polite"></p>
+      </section>
     </div>
   </main>
 

@@ -11,6 +11,10 @@
     tasteProfile: null,
   };
 
+  // The pair the Taste Deck last fetched via GET /api/taste/pair — echoed back
+  // on vote so the server can revalidate it hasn't changed underneath the user.
+  var currentTastePair = null;
+
   var $ = function (id) {
     return document.getElementById(id);
   };
@@ -697,6 +701,69 @@
     }
   }
 
+  // -- taste deck (M009/S01) --------------------------------------------------
+
+  function candidateLabel(cand) {
+    return "entry " + cand.entry_id + " · " + cand.sha256.slice(0, 12);
+  }
+
+  function renderTasteDeck(pair) {
+    var empty = $("taste-deck-empty");
+    var body = $("taste-deck-body");
+    if (!pair.available) {
+      empty.hidden = false;
+      body.hidden = true;
+      return;
+    }
+    empty.hidden = true;
+    body.hidden = false;
+    $("taste-deck-a").textContent = candidateLabel(pair.a);
+    $("taste-deck-b").textContent = candidateLabel(pair.b);
+  }
+
+  async function loadTastePair() {
+    try {
+      var pair = await fetchJSON("/api/taste/pair");
+      currentTastePair = pair.available ? pair : null;
+      renderTasteDeck(pair);
+    } catch (err) {
+      currentTastePair = null;
+      $("taste-deck-status").textContent = "Could not load the pair.";
+      showToast(err.message, true);
+    }
+  }
+
+  async function submitVote(prefer) {
+    if (!currentTastePair) {
+      await loadTastePair();
+      return;
+    }
+    var pair = currentTastePair;
+    try {
+      var result = await fetchJSON("/api/taste/vote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prefer: prefer,
+          note: "",
+          a_entry_id: pair.a.entry_id,
+          b_entry_id: pair.b.entry_id,
+        }),
+      });
+      $("taste-deck-status").classList.remove("error");
+      $("taste-deck-status").textContent =
+        "Recorded — profile now version " + result.profile_version + ".";
+      await loadTastePair();
+    } catch (err) {
+      if (err.message.indexOf("(409)") !== -1) {
+        $("taste-deck-status").textContent = "The pair changed — showing a new one.";
+        await loadTastePair();
+        return;
+      }
+      showToast(err.message, true);
+    }
+  }
+
   // -- view switching --------------------------------------------------------
 
   function showView(view) {
@@ -712,7 +779,10 @@
       }
     });
     if (view === "review") renderReview();
-    if (view === "taste") loadTasteProfile();
+    if (view === "taste") {
+      loadTasteProfile();
+      loadTastePair();
+    }
   }
 
   // -- boot ------------------------------------------------------------------
@@ -774,6 +844,12 @@
     showView("taste");
   });
   $("taste-submit").addEventListener("click", submitReaction);
+  $("taste-prefer-a").addEventListener("click", function () {
+    submitVote("a");
+  });
+  $("taste-prefer-b").addEventListener("click", function () {
+    submitVote("b");
+  });
   ["pending", "approved", "rejected", "all"].forEach(function (key) {
     $("filter-" + key).addEventListener("click", function () {
       setFilter(key);

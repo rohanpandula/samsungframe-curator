@@ -23,6 +23,11 @@ never reimplements business logic (MEM003 / MEM010 thin-handler rule):
   Room turn (503 when no extraction provider is enabled — it never guesses), and
   ``POST /api/taste/{pin,edit,dispute}`` applies a correction to one claim.
   ``POST /api/taste/explain`` returns the rerank explanation citing the profile.
+- ``GET /api/taste/pair``     — the current A/B taste comparison
+  (M009/S01), or ``{"available": false}`` when fewer than two analyzed
+  candidates remain; ``POST /api/taste/vote`` answers it (409 if the pair
+  changed since it was fetched), ``GET /api/taste/votes`` lists every recorded
+  vote, and ``POST /api/taste/retract`` reverses one without deleting it.
 - ``GET /`` + ``/app``        — the review SPA (``webui/``) served by starlette
   ``StaticFiles``.
 - ``GET /consolidation-plan`` — a ``?path=`` directory inventory via
@@ -89,7 +94,7 @@ from curator.taste.dialogue.upstream import (
     explain_rank,
     profile_dimensions,
 )
-from curator.taste.profiles import default_profile
+from curator.taste.store import TasteVoteStore, next_pair
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
 HOST = "127.0.0.1"
@@ -212,6 +217,29 @@ class TasteClaimRequest(BaseModel):
 
     claim_id: str
     text: str = ""
+
+
+class TasteVoteRequest(BaseModel):
+    """JSON request body for ``POST /api/taste/vote`` (M009/S01).
+
+    ``prefer`` must be ``"a"`` or ``"b"`` (validated explicitly — a non-matching
+    string maps to 400, not a raw 422). ``a_entry_id``/``b_entry_id`` are the two
+    candidate ids the client is looking at, resolved from the most recent
+    ``GET /api/taste/pair`` response — required, not optional, so a stale client
+    cannot silently vote on a substitute pair: the handler recomputes the pair
+    fresh and 409s on a mismatch instead of trusting these blindly.
+    """
+
+    prefer: str
+    note: str = ""
+    a_entry_id: int
+    b_entry_id: int
+
+
+class TasteRetractRequest(BaseModel):
+    """JSON request body for ``POST /api/taste/retract`` (M009/S01)."""
+
+    vote_group: str
 
 
 def create_app(catalog: Catalog | None = None) -> FastAPI:
@@ -743,13 +771,113 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         """Dispute a claim: remove it and mark its evidence for re-interpretation."""
         return _taste_claim_action(_catalog(request), body, "dispute")
 
+    # -- taste vote capture (M009/S01) -------------------------------------------
+
+    def _entry_pair_info(catalog: Catalog, entry_id: int) -> dict[str, Any]:
+        """Return ``{entry_id, sha256, asset_id}`` for one catalog entry."""
+        row = catalog.db.execute(
+            "SELECT sha256, asset_id FROM catalog_entries WHERE id = ?", (entry_id,)
+        ).fetchone()
+        return {
+            "entry_id": entry_id,
+            "sha256": str(row[0]) if row else "",
+            "asset_id": str(row[1]) if row else "",
+        }
+
+    @app.get("/api/taste/pair")
+    def taste_pair(request: Request) -> dict:
+        """Return the current A/B taste comparison, or ``available: false``.
+
+        This response is the single source of truth the client must echo back
+        on vote — ``a.entry_id``/``b.entry_id`` are exactly what
+        ``POST /api/taste/vote`` demands and revalidates.
+        """
+        catalog = _catalog(request)
+        pair = next_pair(catalog)
+        if pair is None:
+            return {
+                "available": False,
+                "reason": "fewer than two analyzed candidates remaining",
+            }
+        a, b = pair
+        return {
+            "available": True,
+            "a": _entry_pair_info(catalog, int(a["id"])),
+            "b": _entry_pair_info(catalog, int(b["id"])),
+        }
+
+    @app.post("/api/taste/vote")
+    def taste_vote(body: TasteVoteRequest, request: Request) -> dict:
+        """Record a pairwise vote, revalidating the pair the client saw.
+
+        Recomputes ``next_pair`` fresh, independently of whatever the client
+        displayed, and 409s on any mismatch against ``a_entry_id``/
+        ``b_entry_id`` without recording anything — closes the TOCTOU window
+        between ``GET /api/taste/pair`` and this call (catalog state can change
+        between the two, e.g. a background watcher analyzing new photos).
+        """
+        if body.prefer not in ("a", "b"):
+            raise HTTPException(status_code=400, detail="'prefer' must be 'a' or 'b'")
+        catalog = _catalog(request)
+        pair = next_pair(catalog)
+        if pair is None:
+            raise HTTPException(status_code=400, detail="no pair available")
+        a, b = pair
+        a_id, b_id = int(a["id"]), int(b["id"])
+        if (a_id, b_id) != (body.a_entry_id, body.b_entry_id):
+            raise HTTPException(
+                status_code=409,
+                detail="the compared pair has changed since it was fetched — "
+                "GET /api/taste/pair again and retry",
+            )
+        winner_id, loser_id = (a_id, b_id) if body.prefer == "a" else (b_id, a_id)
+        try:
+            record = TasteVoteStore(catalog).record_vote(winner_id, loser_id, note=body.note)
+        except CuratorError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        profile_version = TasteVoteStore(catalog).load_profile().version
+        return {
+            "vote_group": record.vote_group,
+            "winner_entry_id": record.winner_entry_id,
+            "loser_entry_id": record.loser_entry_id,
+            "profile_version": profile_version,
+        }
+
+    @app.get("/api/taste/votes")
+    def taste_votes(request: Request) -> dict:
+        """List every recorded pairwise vote (winner/loser/note/retracted status)."""
+        votes = TasteVoteStore(_catalog(request)).votes()
+        return {"votes": [v.to_dict() for v in votes], "count": len(votes)}
+
+    @app.post("/api/taste/retract")
+    def taste_retract(body: TasteRetractRequest, request: Request) -> dict:
+        """Retract a vote, reversing its effect on the persisted profile.
+
+        Never deletes the underlying rows — 404s when *vote_group* is unknown
+        or already retracted rather than silently no-op-succeeding.
+        """
+        catalog = _catalog(request)
+        store = TasteVoteStore(catalog)
+        if not store.retract(body.vote_group):
+            raise HTTPException(
+                status_code=404, detail=f"no vote with id {body.vote_group!r}"
+            )
+        return {
+            "retracted": True,
+            "vote_group": body.vote_group,
+            "profile_version": store.load_profile().version,
+        }
+
     @app.post("/api/taste/explain")
     def taste_explain(body: AnalyzeRequest, request: Request) -> dict:
         """Explain one rerank, citing the taste profile by the user's own words.
 
-        This is R036 in the live product: the M007 personal delta stays the
-        machine evidence, and the profile supplies the words. With an empty
-        profile the rationale is exactly the uncited baseline.
+        This is R036 in the live product: the M007 personal delta now cites the
+        real persisted Lens profile (M009/S01 — every recorded vote moves it),
+        and the M008 profile supplies the words. With zero votes cast,
+        ``TasteVoteStore.load_profile`` reads back byte-identical to
+        ``default_profile()``, so the rationale is exactly the uncited baseline
+        until a vote actually exists.
         """
         catalog = _catalog(request)
         data, sha = _resolve_image(catalog, body.asset, body.bytes)
@@ -760,7 +888,7 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         except AnalysisError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         explanation = explain_rank(
-            analysis, default_profile(), _taste_profile_document(catalog)
+            analysis, TasteVoteStore(catalog).load_profile(), _taste_profile_document(catalog)
         )
         return explanation.to_dict()
 
