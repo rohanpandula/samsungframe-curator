@@ -241,3 +241,63 @@ def test_upgrade_from_v2_to_v3(data_root):
         assert "finished_at" in cols
     finally:
         conn.close()
+
+
+def test_migration_v16_adds_vote_pairing_columns(dbase):
+    """v16 adds vote_group + retracted_at to taste_preferences (M009/S01)."""
+    cols = {r[1] for r in dbase.execute("PRAGMA table_info(taste_preferences)")}
+    for name in ("vote_group", "retracted_at"):
+        assert name in cols, f"missing v16 column {name}"
+    # v13 columns are preserved for backward compatibility.
+    for name in ("id", "profile_id", "catalog_entry_id", "preference", "note", "created_at"):
+        assert name in cols, f"v13 column lost {name}"
+
+
+def test_migration_v16_creates_vote_group_index(dbase):
+    """v16 ships the vote_group lookup index on taste_preferences."""
+    indexes = {
+        r[0]
+        for r in dbase.execute(
+            "SELECT name FROM sqlite_master"
+            " WHERE type='index' AND tbl_name='taste_preferences'"
+        )
+    }
+    assert "idx_taste_preferences_vote_group" in indexes
+
+
+def test_migration_v16_new_columns_nullable_no_default(dbase):
+    """v16 columns are nullable with no DEFAULT — a pre-M009 4-column INSERT works."""
+    dbase.execute(
+        "INSERT INTO taste_preferences(profile_id, catalog_entry_id, preference, note)"
+        " VALUES (1, 1, 1, 'legacy fixture row')"
+    )
+    dbase.commit()
+    row = dbase.execute(
+        "SELECT vote_group, retracted_at FROM taste_preferences WHERE note = ?",
+        ("legacy fixture row",),
+    ).fetchone()
+    assert row == (None, None)
+
+
+def test_upgrade_from_v15_to_v16(data_root):
+    """A v15-only DB upgrades in place to v16 via the linear migration runner."""
+    conn = db.connect()
+    try:
+        # Force a v15-only database: apply migrations 1-15 and pin user_version to 15.
+        for _version, ddl in schema.MIGRATIONS[:15]:
+            conn.executescript(ddl)
+        conn.execute("PRAGMA user_version = 15")
+        conn.commit()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(taste_preferences)")}
+        assert "vote_group" not in cols  # v15 does not have the vote-pairing columns
+
+        db.migrate(conn)
+
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == schema.SCHEMA_VERSION
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(taste_preferences)")}
+        assert "vote_group" in cols
+        assert "retracted_at" in cols
+    finally:
+        conn.close()
