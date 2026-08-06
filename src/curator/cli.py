@@ -2021,6 +2021,7 @@ def _taste_compare(args: argparse.Namespace) -> int:
             lens_scorer,
             embedding_scorer_factory,
             baseline_scorer,
+            lens_sample_efficiency_pairs=current_profile.version - 1,
         )
     finally:
         catalog.db.close()

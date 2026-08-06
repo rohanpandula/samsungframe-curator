@@ -1120,6 +1120,7 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             lens_scorer,
             embedding_scorer_factory,
             baseline_scorer,
+            lens_sample_efficiency_pairs=current_profile.version - 1,
         )
         return comparison.to_dict()
 

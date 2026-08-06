@@ -444,6 +444,7 @@ def test_acceptance_taste_embedding_comparison_insufficient_then_decisive() -> N
         lens_scorer=lens_scorer,
         embedding_scorer_factory=disagreeing_embedding_factory,
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=0,
     )
     assert underpowered.discordant_pairs < MIN_DISCORDANT_PAIRS
     assert underpowered.verdict == "insufficient_evidence"
@@ -473,6 +474,7 @@ def test_acceptance_taste_embedding_comparison_insufficient_then_decisive() -> N
         lens_scorer=lower_index_lens_scorer,
         embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=len(training_votes),
     )
     assert decisive.discordant_pairs >= MIN_DISCORDANT_PAIRS
     assert decisive.verdict in {"embedding_better", "lens_better"}

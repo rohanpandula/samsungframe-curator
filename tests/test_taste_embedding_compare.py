@@ -108,6 +108,7 @@ def test_compare_heads_reports_insufficient_evidence_below_min_discordant_pairs(
         lens_scorer=lens_scorer,
         embedding_scorer_factory=embedding_scorer_factory,
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=0,
     )
 
     assert comparison.discordant_pairs == 3
@@ -160,6 +161,7 @@ def test_compare_heads_zero_capacity_embedding_head_is_never_rewarded_by_ties() 
         lens_scorer=lens_scorer,
         embedding_scorer_factory=zero_capacity_embedding_factory,
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=0,
     )
 
     assert comparison.embedding_evidence.sample_efficiency_pairs == 0
@@ -171,6 +173,41 @@ def test_compare_heads_zero_capacity_embedding_head_is_never_rewarded_by_ties() 
     # an opinion to disagree with.
     assert comparison.discordant_pairs == 0
     assert comparison.verdict == "insufficient_evidence"
+
+
+# ---------------------------------------------------------------------------
+# WR-01: lens_evidence.sample_efficiency_pairs is the lens's own count
+# ---------------------------------------------------------------------------
+
+
+def test_lens_evidence_sample_efficiency_reflects_lens_profile_not_embedding_head() -> None:
+    """``lens_evidence.sample_efficiency_pairs`` must be the caller-supplied lens
+    profile vote count, never silently reused from the embedding head's own
+    ``n_training`` — the two can differ sharply (e.g. most votes' images not
+    embedded yet, so ``n_training`` under-reports how much data actually
+    trained the lens head)."""
+    candidates, analysis_map, training_votes, held_out_pairs, vector_by_id = (
+        _well_powered_fixture()
+    )
+    # Deliberately distinct from len(training_votes) (43) so a caller who wired
+    # the two counts together (or reused one for both) would be caught immediately.
+    lens_count = 999
+    comparison = compare_heads(
+        training_votes=training_votes,
+        held_out_pairs=held_out_pairs,
+        candidates=candidates,
+        analysis_map=analysis_map,
+        lens_scorer=_zero_scorer,
+        embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
+        baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=lens_count,
+    )
+    assert comparison.lens_evidence.sample_efficiency_pairs == lens_count
+    assert comparison.embedding_evidence.sample_efficiency_pairs == len(training_votes)
+    assert (
+        comparison.lens_evidence.sample_efficiency_pairs
+        != comparison.embedding_evidence.sample_efficiency_pairs
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +325,7 @@ def test_compare_heads_reaches_decisive_verdict_when_embedding_correlates() -> N
         lens_scorer=_lower_index_lens_scorer,
         embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=len(training_votes),
     )
 
     assert comparison.discordant_pairs >= MIN_DISCORDANT_PAIRS
@@ -316,6 +354,7 @@ def test_learning_curve_checkpoints_are_non_decreasing_and_improve_with_more_vot
         lens_scorer=_zero_scorer,
         embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=len(training_votes),
     )
 
     votes_seen = [point["votes"] for point in comparison.learning_curve]
@@ -378,6 +417,7 @@ def test_promote_if_valid_result_is_structurally_independent_of_verdict() -> Non
         lens_scorer=scorer,
         embedding_scorer_factory=embedding_scorer_factory,
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=0,
     )
 
     assert comparison.lens_promoted is True
@@ -406,6 +446,7 @@ def test_head_comparison_to_dict_from_dict_round_trip() -> None:
         lens_scorer=_zero_scorer,
         embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
         baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=len(training_votes),
     )
 
     rebuilt = HeadComparison.from_dict(json.loads(json.dumps(comparison.to_dict())))

@@ -171,6 +171,8 @@ def compare_heads(
     lens_scorer: Scorer,
     embedding_scorer_factory: Callable[[Sequence[VoteVectors]], Scorer],
     baseline_scorer: Scorer,
+    *,
+    lens_sample_efficiency_pairs: int,
 ) -> HeadComparison:
     """Compare the lens and embedding heads over the same held-out evidence.
 
@@ -211,6 +213,14 @@ def compare_heads(
        prefix and re-evaluate against the same *held_out_pairs*, recording its
        held-out accuracy at each checkpoint — computed deterministically from
        the same vote history, no held-out re-sampling.
+
+    *lens_sample_efficiency_pairs* is the lens profile's own preference-update
+    count (WR-01) — stated explicitly by the caller, the same way every
+    :func:`~curator.taste.pairwise.evaluate` caller already must, rather than
+    this function reusing ``len(training_votes)`` (the *embedding* head's own
+    count) for both evidence blocks. The two can differ sharply: a lens profile
+    moves on every cast vote, but ``training_votes`` only counts votes whose
+    both images already have a stored embedding, which can lag far behind.
     """
     embedding_scorer = embedding_scorer_factory(training_votes)
     n_training = len(training_votes)
@@ -221,7 +231,7 @@ def compare_heads(
         candidates,
         analysis_map,
         held_out_pairs,
-        sample_efficiency_pairs=n_training,
+        sample_efficiency_pairs=lens_sample_efficiency_pairs,
     )
     embedding_evidence = evaluate(
         embedding_scorer,
