@@ -148,7 +148,7 @@ def resolve_vote_vectors(
     return resolved
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class EmbeddingHead:
     """A nonparametric preference scorer: the retained parameters ARE the votes.
 
@@ -159,6 +159,18 @@ class EmbeddingHead:
     shared across every term (``0.0`` when ``capacity == 0``). ``capacity``
     is kept as a convenience field for display/logging — derived from, never
     an independent source of truth against, ``vote_terms``.
+
+    Not intended for ``==``/hashing (WR-04): ``vote_terms`` carries numpy
+    arrays, mirroring :class:`VoteVectors`'s (this module) and
+    :class:`~curator.taste.embedding.store.StoredEmbedding`'s documented
+    posture — a default (auto-generated) dataclass ``__eq__`` would raise
+    ``ValueError`` comparing arrays elementwise, and its ``__hash__`` would
+    raise ``TypeError`` hashing an unhashable ndarray. ``eq=False`` makes
+    that structural (falls back to identity-based ``==``/``hash()``, both of
+    which are safe, never a confusing numpy error deep in dataclass
+    internals) rather than only a docstring promise. Compare fields
+    individually (``np.array_equal`` for ``vote_terms``), never dataclass
+    equality.
 
     :meth:`to_dict`/:meth:`from_dict` exist for round-trip-testability and
     this codebase's frozen-dataclass convention — **no schema/table persists

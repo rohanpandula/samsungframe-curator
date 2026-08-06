@@ -125,6 +125,29 @@ def test_fit_embedding_head_deterministic_no_seed():
 
 
 # ---------------------------------------------------------------------------
+# WR-04: == / hash() must not crash on a head holding real vote_terms
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_head_eq_and_hash_do_not_raise():
+    """Before the fix, ``head1 == head2`` raised ``ValueError`` (numpy array
+    truth-value ambiguity) and ``hash(head1)`` raised ``TypeError`` (unhashable
+    ndarray) the moment a head held any votes — ``eq=False`` makes both safe
+    (identity-based), never a confusing numpy error deep in dataclass
+    internals. Structural fields are still comparable individually."""
+    votes = _synthetic_votes(3)
+    head1 = fit_embedding_head(votes, "v1")
+    head2 = fit_embedding_head(votes, "v1")
+
+    assert (head1 == head2) is False  # identity-based, not structural
+    assert (head1 == head1) is True
+    assert isinstance(hash(head1), int)  # does not raise
+    # Structural equivalence is still checkable field-by-field.
+    assert head1.alpha == head2.alpha
+    assert all(np.array_equal(a, b) for a, b in zip(head1.vote_terms, head2.vote_terms))
+
+
+# ---------------------------------------------------------------------------
 # directional sanity check
 # ---------------------------------------------------------------------------
 
