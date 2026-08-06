@@ -18,9 +18,25 @@ from curator.taste.embedding.errors import (
     EmbeddingUnavailableError,
     EmbeddingVersionError,
 )
+from curator.taste.embedding.provider import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_VERSION,
+    EmbeddingCapabilities,
+    EmbeddingProvider,
+    OnnxEmbeddingProvider,
+    resolve_expected_sha256,
+    resolve_model_path,
+)
 
 __all__ = [
+    "EMBEDDING_DIM",
+    "EMBEDDING_MODEL_VERSION",
+    "EmbeddingCapabilities",
     "EmbeddingError",
+    "EmbeddingProvider",
     "EmbeddingUnavailableError",
     "EmbeddingVersionError",
+    "OnnxEmbeddingProvider",
+    "resolve_expected_sha256",
+    "resolve_model_path",
 ]
