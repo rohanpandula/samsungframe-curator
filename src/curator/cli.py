@@ -34,6 +34,17 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
 - ``curator taste dispute ID`` — remove a claim and mark its evidence for
                                re-interpretation on the append-only timeline (exit 3 when
                                no claim carries that id).
+- ``curator taste vote [--prefer a|b] [--note TEXT]`` — preview the current A/B
+                               taste comparison ``pairwise.choose_pair`` selects (no
+                               flags, exit 3, records nothing) or answer it
+                               (``--prefer``, exit 0), persisting the vote to
+                               ``taste_preferences`` and the moved profile to
+                               ``taste_profiles``.
+- ``curator taste votes [--json]`` — list every recorded vote (winner/loser/note/
+                               retracted status), oldest first.
+- ``curator taste retract VOTE_GROUP`` — retract a vote by its ``vote_group`` id,
+                               reversing its effect on the persisted profile without
+                               deleting history (exit 3 when no vote carries that id).
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -104,6 +115,7 @@ from curator.taste.dialogue.retention import save_to_catalog
 from curator.taste.dialogue.room import ReactionRoom
 from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore
+from curator.taste.store import TasteVoteStore, next_pair
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
 # 3=no-change. Every subcommand returns one of these; ``main`` maps uncaught
@@ -383,6 +395,42 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the recorded dispute event as JSON",
+    )
+
+    vote = taste_sub.add_parser(
+        "vote",
+        help="preview the current A/B taste comparison, or answer it with --prefer",
+    )
+    vote.add_argument(
+        "--prefer",
+        choices=["a", "b"],
+        default=None,
+        help="which shown candidate you prefer; omit to preview the pair without "
+        "recording a vote",
+    )
+    vote.add_argument("--note", default="", help="optional note recorded with the vote")
+    vote.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the pair/vote result as JSON",
+    )
+
+    votes = taste_sub.add_parser("votes", help="list recorded pairwise votes")
+    votes.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the vote history as JSON",
+    )
+
+    retract = taste_sub.add_parser(
+        "retract",
+        help="retract a recorded vote, reversing its effect on the persisted profile",
+    )
+    retract.add_argument("vote_group", help="vote_group id to retract (see `taste votes`)")
+    retract.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the retraction result as JSON",
     )
 
     headless = sub.add_parser(
@@ -1244,6 +1292,12 @@ def _taste(args: argparse.Namespace) -> int:
         return _taste_profile(args)
     if args.taste_command == "dispute":
         return _taste_dispute(args)
+    if args.taste_command == "vote":
+        return _taste_vote(args)
+    if args.taste_command == "votes":
+        return _taste_votes(args)
+    if args.taste_command == "retract":
+        return _taste_retract(args)
     return EXIT_FATAL
 
 
@@ -1325,6 +1379,127 @@ def _taste_dispute(args: argparse.Namespace) -> int:
             print(f"taste dispute: removed claim {args.claim_id}")
             print(f"  was: {claim.text}")
             print(f"  {event.detail}")
+        return EXIT_OK
+    finally:
+        catalog.db.close()
+
+
+def _taste_pair_candidate(catalog: Catalog, entry_id: int) -> dict[str, Any]:
+    """Return ``{entry_id, sha256, asset_id}`` for one catalog entry (pair display)."""
+    row = catalog.db.execute(
+        "SELECT sha256, asset_id FROM catalog_entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return {
+        "entry_id": entry_id,
+        "sha256": str(row[0]) if row else "",
+        "asset_id": str(row[1]) if row else "",
+    }
+
+
+def _taste_vote(args: argparse.Namespace) -> int:
+    """Preview the current A/B taste comparison, or answer it with ``--prefer``.
+
+    Without ``--prefer``, prints the pair :func:`~curator.taste.store.next_pair`
+    currently selects and records nothing (exit :data:`EXIT_NO_CHANGE`) — mirrors
+    ``_taste_drop``'s no-note preview. With ``--prefer``, records the vote and
+    prints the new profile version (exit :data:`EXIT_OK`).
+    """
+    catalog = Catalog()
+    try:
+        pair = next_pair(catalog)
+        if pair is None:
+            print("taste vote: not enough analyzed images with votes remaining to compare")
+            return EXIT_NO_CHANGE
+        a, b = pair
+        if args.prefer is None:
+            info = {
+                "a": _taste_pair_candidate(catalog, int(a["id"])),
+                "b": _taste_pair_candidate(catalog, int(b["id"])),
+            }
+            if args.json:
+                print(json.dumps(info, ensure_ascii=False))
+            else:
+                print("taste vote: current pair —")
+                for label in ("a", "b"):
+                    cand = info[label]
+                    print(
+                        f"  {label.upper()}: entry {cand['entry_id']}"
+                        f" sha256={cand['sha256'][:12]} asset={cand['asset_id']}"
+                    )
+                print("  answer with `curator taste vote --prefer a|b`")
+            return EXIT_NO_CHANGE
+        winner, loser = (a, b) if args.prefer == "a" else (b, a)
+        store = TasteVoteStore(catalog)
+        record = store.record_vote(int(winner["id"]), int(loser["id"]), note=args.note)
+        profile = store.load_profile()
+        if args.json:
+            payload = record.to_dict()
+            payload["profile_version"] = profile.version
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(
+                f"taste vote: recorded {record.vote_group}"
+                f" (entry {record.winner_entry_id} over entry {record.loser_entry_id})"
+                f" — profile now version {profile.version}"
+            )
+        return EXIT_OK
+    finally:
+        catalog.db.close()
+
+
+def _taste_votes(args: argparse.Namespace) -> int:
+    """List every recorded pairwise vote (winner/loser/note/retracted status)."""
+    catalog = Catalog()
+    try:
+        records = TasteVoteStore(catalog).votes()
+        if args.json:
+            print(json.dumps([r.to_dict() for r in records], ensure_ascii=False))
+        elif not records:
+            print("taste votes: (none yet — cast one with `curator taste vote`)")
+        else:
+            for record in records:
+                status = "retracted" if record.retracted else "active"
+                note = f' "{record.note}"' if record.note else ""
+                print(
+                    f"  [{record.vote_group}] entry {record.winner_entry_id} over"
+                    f" entry {record.loser_entry_id} ({status}){note}"
+                )
+        return EXIT_OK
+    finally:
+        catalog.db.close()
+
+
+def _taste_retract(args: argparse.Namespace) -> int:
+    """Retract a recorded vote, reversing its effect on the persisted profile.
+
+    Exits :data:`EXIT_NO_CHANGE` when no vote carries that id (unknown or
+    already retracted) — mirrors ``_taste_dispute``'s exit-code idiom. History
+    is never deleted: the retracted rows stay visible via ``taste votes``.
+    """
+    catalog = Catalog()
+    try:
+        store = TasteVoteStore(catalog)
+        changed = store.retract(args.vote_group)
+        if not changed:
+            print(f"taste retract: no vote with id {args.vote_group!r}")
+            return EXIT_NO_CHANGE
+        profile = store.load_profile()
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "retracted": True,
+                        "vote_group": args.vote_group,
+                        "profile_version": profile.version,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(
+                f"taste retract: reversed {args.vote_group}"
+                f" — profile now version {profile.version}"
+            )
         return EXIT_OK
     finally:
         catalog.db.close()
