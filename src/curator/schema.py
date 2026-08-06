@@ -586,6 +586,50 @@ CREATE INDEX IF NOT EXISTS idx_taste_preferences_vote_group
     ON taste_preferences(vote_group);
 """
 
+# Migration v17 (M009/S02): adds content_embeddings — the first BLOB column in
+# this schema (confirmed via a schema grep with no prior hits). This is v17, not
+# v16: 01-CONTEXT.md's original "v16 = embeddings BLOB" note is superseded by
+# S01's vote-pairing decision, which claimed v16 for the vote_group/retracted_at
+# columns on taste_preferences first. A mechanical, sequential version
+# allocation, not a policy change.
+#
+# ``content_embeddings`` stores one row per (content, model checkpoint): a
+# semantic image-embedding vector produced by the local ONNX CLIP/SigLIP
+# provider (src/curator/taste/embedding/provider.py). Mirrors ``content_image``'s
+# (v2) content-scoped upsert precedent, but keyed by the composite (sha256,
+# model_version) rather than sha256 alone — a model upgrade therefore appends a
+# new row per content hash rather than silently overwriting or colliding with
+# vectors from a different checkpoint. There is no dimension-based way to detect
+# a cross-model-version comparison (two 512-dim vectors from different
+# checkpoints look identical in shape), so every comparison in
+# src/curator/taste/embedding/store.py asserts matching model_version and raises
+# EmbeddingVersionError before computing anything.
+#
+# - ``sha256``        — the content hash the vector was computed from (FK to
+#   ``content``, CASCADE delete — a vector never outlives its content row).
+# - ``model_version``  — names the pinned checkpoint + revision the vector was
+#   produced under (e.g. "clip-vit-b-32-laion2b-1").
+# - ``dim``            — the vector's dimensionality (512 for the default
+#   checkpoint), recorded alongside the BLOB rather than inferred from its byte
+#   length, so a corrupt/truncated BLOB is detectable rather than silently misread.
+# - ``vector``          — the float32 vector, serialized via
+#   ``vector.astype(np.float32).tobytes()`` (little-endian, platform-native —
+#   this repo runs on a single machine's SQLite file, not a cross-platform wire
+#   format).
+# - ``created_at``      — wall-clock stamp, refreshed on every upsert (a
+#   recompute overwrites in place — mirrors ``content_image``'s
+#   idempotent-on-reingest posture).
+SCHEMA_V17_SQL = """
+CREATE TABLE IF NOT EXISTS content_embeddings (
+    sha256        TEXT NOT NULL REFERENCES content(sha256) ON DELETE CASCADE,
+    model_version TEXT NOT NULL,
+    dim           INTEGER NOT NULL,
+    vector        BLOB NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (sha256, model_version)
+);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -604,6 +648,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (14, SCHEMA_V14_SQL),
     (15, SCHEMA_V15_SQL),
     (16, SCHEMA_V16_SQL),
+    (17, SCHEMA_V17_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
@@ -639,4 +684,5 @@ EXPECTED_TABLES: list[str] = [
     "taste_observations",
     "taste_profile_doc",
     "taste_profile_events",
+    "content_embeddings",
 ]
