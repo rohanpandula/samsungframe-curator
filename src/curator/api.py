@@ -934,6 +934,20 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         sha_to_entry_id = {str(sha): int(entry_id) for entry_id, sha in rows}
         return list(sha_to_entry_id.keys()), sha_to_entry_id
 
+    def _entry_id_for_sha(catalog: Catalog, sha: str) -> int | None:
+        """Return the highest-id catalog entry for *sha*, or ``None`` when uncataloged.
+
+        Mirrors the CLI's ``_taste_embedding_resolve`` sha branch exactly (same
+        query) — WR-03: a ``bytes``-only request whose content was never
+        cataloged legitimately has no entry id, so this returns ``None`` rather
+        than raising.
+        """
+        row = catalog.db.execute(
+            "SELECT id FROM catalog_entries WHERE sha256 = ? ORDER BY id DESC LIMIT 1",
+            (sha,),
+        ).fetchone()
+        return int(row[0]) if row is not None else None
+
     @app.post("/api/taste/embedding-explain")
     def taste_embedding_explain(body: AnalyzeRequest, request: Request) -> dict:
         """Explain one embedding-head score: per-vote attribution + nearest liked exemplars.
@@ -944,11 +958,13 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         fits the head fresh over every resolvable vote (S03 — nothing is
         persisted), then returns ``attribute_score``/``find_exemplars``/
         ``render_rationale`` over it — the identical JSON shape
-        ``curator taste embedding-explain`` prints. 503s when the embedding
-        provider itself is unavailable (mirrors ``taste_drop``'s "unavailable, not
-        broken" posture for ``ReactionRoomUnavailableError``), and again if
-        on-demand embedding fails after a passing probe (T-09-05: a model file can
-        be swapped out between the probe and this call).
+        ``curator taste embedding-explain`` prints, ``entry_id`` included
+        (WR-03: ``None`` for a ``bytes``-only request whose content was never
+        cataloged). 503s when the embedding provider itself is unavailable
+        (mirrors ``taste_drop``'s "unavailable, not broken" posture for
+        ``ReactionRoomUnavailableError``), and again if on-demand embedding
+        fails after a passing probe (T-09-05: a model file can be swapped out
+        between the probe and this call).
         """
         catalog = _catalog(request)
         data, sha = _resolve_image(catalog, body.asset, body.bytes)
@@ -976,6 +992,7 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         )
         rationale = render_rationale(attribution, exemplars)
         return {
+            "entry_id": _entry_id_for_sha(catalog, sha),
             "sha256": sha,
             "score": attribution.score,
             "rationale": rationale,

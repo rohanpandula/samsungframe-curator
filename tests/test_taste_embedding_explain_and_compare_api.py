@@ -12,6 +12,7 @@ call) — mirroring ``tests/test_taste_vote_flow.py``'s API-testing pattern.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 from pathlib import Path
@@ -19,10 +20,12 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from acceptance_harness import run_cli
 from curator.analysis.pipeline import AnalysisAsset, AnalysisPipeline
 from curator.analysis.schema import AnalysisResult, ColorStory, QualitySignals
 from curator.api import create_app
 from curator.catalog import Catalog
+from curator.cli import EXIT_OK
 from curator.connectors.local import LocalConnector
 from curator.taste.embedding.provider import EMBEDDING_MODEL_VERSION, OnnxEmbeddingProvider
 from curator.taste.embedding.store import EmbeddingStore
@@ -237,7 +240,8 @@ def test_api_embedding_explain_returns_score_rationale_contributions_exemplars(
     resp = client.post("/api/taste/embedding-explain", json={"asset": sha_a})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) >= {"sha256", "score", "rationale", "contributions", "exemplars"}
+    assert set(body) >= {"entry_id", "sha256", "score", "rationale", "contributions", "exemplars"}
+    assert body["entry_id"] == entry_a  # WR-03
     assert body["sha256"] == sha_a
     assert isinstance(body["score"], float)
     assert isinstance(body["rationale"], str) and body["rationale"]
@@ -251,3 +255,61 @@ def test_api_embedding_explain_503_when_embedding_provider_unavailable(data_root
     _entry_a, sha_a, _data_a = _cataloged_and_analyzed(catalog, tmp_path, "a.png", (200, 30, 30))
     resp = client.post("/api/taste/embedding-explain", json={"asset": sha_a})
     assert resp.status_code == 503
+
+
+def test_api_embedding_explain_uncataloged_bytes_503s_not_a_bad_entry_id(data_root, monkeypatch):
+    """A ``bytes``-only request for genuinely new (never-cataloged) content 503s —
+    ``content_embeddings`` has a real foreign key to ``content(sha256)``, and the
+    ``bytes`` path never inserts a ``content`` row, so storing a freshly-computed
+    vector fails before ``entry_id`` resolution is ever reached. WR-03's ``entry_id``
+    is therefore ``None``-safe by construction (see ``_entry_id_for_sha``) rather
+    than reachable as a ``200`` here; this test documents the actual (pre-existing,
+    unrelated-to-WR-03) boundary rather than asserting a path that cannot occur."""
+    _use_fixture_model(monkeypatch)
+    catalog = Catalog(data_root=data_root)
+    client = TestClient(create_app(catalog=catalog))
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (10, 200, 10)).save(buf, format="PNG")
+    inline = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    resp = client.post("/api/taste/embedding-explain", json={"bytes": inline})
+    assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# WR-03: CLI/API embedding-explain payload parity — the two surfaces the
+# route's own docstring claims produce "the identical JSON shape"
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_explain_cli_and_api_payloads_match_key_for_key(data_root, tmp_path, monkeypatch):
+    _use_fixture_model(monkeypatch)
+    catalog = Catalog(data_root=data_root)
+    client = TestClient(create_app(catalog=catalog))
+    entry_a, sha_a, data_a = _cataloged_and_analyzed(catalog, tmp_path, "a.png", (200, 30, 30))
+    entry_b, sha_b, data_b = _cataloged_and_analyzed(catalog, tmp_path, "b.png", (30, 30, 200))
+
+    vote_resp = client.post(
+        "/api/taste/vote",
+        json={"prefer": "a", "a_entry_id": entry_a, "b_entry_id": entry_b},
+    )
+    assert vote_resp.status_code == 200
+
+    # Pre-embed both sides so the vote is fully resolvable on both surfaces —
+    # neither call below then mutates content_embeddings, keeping the two
+    # computations over byte-identical inputs.
+    provider = OnnxEmbeddingProvider(
+        model_path=FIXTURE_MODEL, model_version=EMBEDDING_MODEL_VERSION
+    )
+    store = EmbeddingStore(catalog)
+    store.set(sha_a, EMBEDDING_MODEL_VERSION, provider.embed(data_a))
+    store.set(sha_b, EMBEDDING_MODEL_VERSION, provider.embed(data_b))
+
+    rc, out = run_cli(["taste", "embedding-explain", sha_a, "--json"])
+    assert rc == EXIT_OK
+    cli_result = json.loads(out)
+
+    api_result = client.post("/api/taste/embedding-explain", json={"asset": sha_a}).json()
+
+    assert set(cli_result) == set(api_result)
+    assert cli_result == api_result
