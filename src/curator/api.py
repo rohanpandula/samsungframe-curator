@@ -32,6 +32,12 @@ never reimplements business logic (MEM003 / MEM010 thin-handler rule):
   (M009/S02) is usable, with no network call either way; read-only (no
   ``--backfill`` equivalent over HTTP — that bulk-recompute loop is a
   CLI-only maintenance operation).
+- ``POST /api/taste/embedding-explain`` — explain one embedding-head score
+  (M009/S04): the exact per-vote attribution (summing back to the score),
+  up to three nearest-neighbour exemplars from the user's own liked images,
+  and a deterministic template ``rationale`` — the same shape
+  ``curator taste embedding-explain`` prints. 503 when the embedding
+  provider itself is unavailable.
 - ``GET /`` + ``/app``        — the review SPA (``webui/``) served by starlette
   ``StaticFiles``.
 - ``GET /consolidation-plan`` — a ``?path=`` directory inventory via
@@ -98,8 +104,12 @@ from curator.taste.dialogue.upstream import (
     explain_rank,
     profile_dimensions,
 )
+from curator.taste.embedding.attribution import attribute_score, find_exemplars, render_rationale
+from curator.taste.embedding.errors import EmbeddingError
+from curator.taste.embedding.head import fit_embedding_head, resolve_vote_vectors
 from curator.taste.embedding.provider import OnnxEmbeddingProvider
-from curator.taste.store import TasteVoteStore, next_pair
+from curator.taste.embedding.store import EmbeddingStore
+from curator.taste.store import TasteVoteStore, VoteRecord, next_pair
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
 HOST = "127.0.0.1"
@@ -887,6 +897,78 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         """
         probe = OnnxEmbeddingProvider().probe()
         return {"ok": probe.ok, "backend": probe.backend.value, "message": probe.message}
+
+    # -- embedding attribution + exemplars (M009/S04) ----------------------------
+
+    def _embedding_liked_shas(
+        catalog: Catalog, votes: list[VoteRecord]
+    ) -> tuple[list[str], dict[str, int]]:
+        """Return ``(liked_shas, sha_to_entry_id)`` for every non-retracted vote winner.
+
+        Mirrors the CLI's ``_taste_liked_shas`` helper exactly (same query, same
+        shape) — this project keeps small per-surface duplication for CLI/API glue
+        rather than a cross-module shared helper, the same precedent
+        ``_entry_pair_info``/``_taste_pair_candidate`` already set.
+        """
+        winner_ids = sorted({v.winner_entry_id for v in votes if not v.retracted})
+        if not winner_ids:
+            return [], {}
+        placeholders = ",".join("?" for _ in winner_ids)
+        rows = catalog.db.execute(
+            f"SELECT id, sha256 FROM catalog_entries WHERE id IN ({placeholders})",
+            winner_ids,
+        ).fetchall()
+        sha_to_entry_id = {str(sha): int(entry_id) for entry_id, sha in rows}
+        return list(sha_to_entry_id.keys()), sha_to_entry_id
+
+    @app.post("/api/taste/embedding-explain")
+    def taste_embedding_explain(body: AnalyzeRequest, request: Request) -> dict:
+        """Explain one embedding-head score: per-vote attribution + nearest liked exemplars.
+
+        Resolves the target the same way ``/api/taste/explain`` already does
+        (``asset``/``bytes`` via ``_resolve_image``), fetches (embedding on demand
+        when missing, mirroring the CLI's ``--backfill`` logic) its stored vector,
+        fits the head fresh over every resolvable vote (S03 — nothing is
+        persisted), then returns ``attribute_score``/``find_exemplars``/
+        ``render_rationale`` over it — the identical JSON shape
+        ``curator taste embedding-explain`` prints. 503s when the embedding
+        provider itself is unavailable (mirrors ``taste_drop``'s "unavailable, not
+        broken" posture for ``ReactionRoomUnavailableError``), and again if
+        on-demand embedding fails after a passing probe (T-09-05: a model file can
+        be swapped out between the probe and this call).
+        """
+        catalog = _catalog(request)
+        data, sha = _resolve_image(catalog, body.asset, body.bytes)
+        provider = OnnxEmbeddingProvider()
+        probe = provider.probe()
+        if not probe.ok:
+            raise HTTPException(status_code=503, detail=probe.message)
+        store = EmbeddingStore(catalog)
+        stored = store.get(sha, provider.model_version)
+        try:
+            if stored is None:
+                vector = provider.embed(data)
+                store.set(sha, provider.model_version, vector)
+            else:
+                vector = stored.vector
+        except EmbeddingError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        vote_records = TasteVoteStore(catalog).votes()
+        vote_vectors = resolve_vote_vectors(vote_records, store, provider.model_version)
+        head = fit_embedding_head(vote_vectors, provider.model_version)
+        liked_shas, sha_to_entry_id = _embedding_liked_shas(catalog, vote_records)
+        attribution = attribute_score(vector, head, vote_vectors)
+        exemplars = find_exemplars(
+            vector, liked_shas, sha_to_entry_id, store, provider.model_version
+        )
+        rationale = render_rationale(attribution, exemplars)
+        return {
+            "sha256": sha,
+            "score": attribution.score,
+            "rationale": rationale,
+            "contributions": attribution.contributions,
+            "exemplars": [e.to_dict() for e in exemplars],
+        }
 
     @app.post("/api/taste/explain")
     def taste_explain(body: AnalyzeRequest, request: Request) -> dict:
