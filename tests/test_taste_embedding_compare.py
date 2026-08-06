@@ -370,6 +370,45 @@ def test_learning_curve_checkpoints_are_non_decreasing_and_improve_with_more_vot
     assert final_accuracy > first_accuracy
 
 
+def test_learning_curve_is_empty_when_zero_training_votes_resolvable() -> None:
+    """WR-02: ``n_training == 0`` (reachable any time cast votes exist but none
+    of their images are embedded yet) must never force a checkpoint at n=1 —
+    ``training_votes[:1]`` on an empty list is still ``[]``, which would
+    mislabel a head actually fit on ZERO votes as ``"votes": 1``. The whole
+    learning curve is empty instead, an honest "nothing to chart yet"."""
+    n = 6
+    candidates = [{"id": f"e{i}", "baseline": 0.0} for i in range(n)]
+    analysis_map = {f"e{i}": _result(f"e{i}", colorfulness=i / (n - 1)) for i in range(n)}
+    held_out_pairs = [("e0", "e1", "e1"), ("e2", "e3", "e3"), ("e4", "e5", "e5")]
+
+    call_count = 0
+
+    def embedding_scorer_factory(votes_subset: Sequence[VoteVectors]) -> Scorer:
+        nonlocal call_count
+        call_count += 1
+
+        def scorer(_analysis: AnalysisResult) -> float:
+            return 0.0
+
+        return scorer
+
+    comparison = compare_heads(
+        training_votes=[],
+        held_out_pairs=held_out_pairs,
+        candidates=candidates,
+        analysis_map=analysis_map,
+        lens_scorer=_zero_scorer,
+        embedding_scorer_factory=embedding_scorer_factory,
+        baseline_scorer=_zero_scorer,
+        lens_sample_efficiency_pairs=0,
+    )
+    assert comparison.learning_curve == []
+    # Called exactly once (the main embedding_scorer over training_votes=[]) —
+    # never once more for a spurious "checkpoint" mislabeled n=1 but actually
+    # fit on the same empty history (training_votes[:1] == [] too).
+    assert call_count == 1
+
+
 # ---------------------------------------------------------------------------
 # promote_if_valid independence: individually "good enough" != head-to-head winner
 # ---------------------------------------------------------------------------

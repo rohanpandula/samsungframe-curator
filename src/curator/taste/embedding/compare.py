@@ -276,6 +276,12 @@ def compare_heads(
         else:
             verdict = "tie"
 
+    # WR-02: `max(1, n_training // 4)` would otherwise force a checkpoint at
+    # n=1 even when n_training == 0 (reachable any time cast votes exist but
+    # none of their images are embedded yet) — `training_votes[:1]` on an
+    # empty list is still `[]`, mislabeling a checkpoint actually fit on ZERO
+    # votes as "votes: 1". Filtering to `0 < n <= n_training` instead skips
+    # the learning curve entirely in that case, rather than lying about it.
     checkpoints = sorted(
         {
             n
@@ -285,7 +291,7 @@ def compare_heads(
                 (3 * n_training) // 4,
                 n_training,
             )
-            if n > 0
+            if 0 < n <= n_training
         }
     )
     learning_curve: list[dict[str, Any]] = []
