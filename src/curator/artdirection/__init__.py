@@ -4,16 +4,27 @@ Carries a human's art-direction intent for one curated set — layout treatment,
 background, processing intent, and per-target overrides — as a versioned,
 JSON-serializable :class:`~curator.artdirection.manifest.ArtDirectionManifest`.
 Also exposes the deterministic policy engine (:mod:`curator.artdirection.policy`)
-that ranks treatments and materializes manifests from analysis signals.
+that ranks treatments and materializes manifests from analysis signals, and the
+pure geometry layer (:mod:`curator.artdirection.packing`, M010/S01) that turns
+N sources into real output-canvas-pixel cells.
 """
 
 from curator.artdirection.manifest import (
+    MAX_LAYOUT_SOURCES,
+    MULTI_CELL_TREATMENTS,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
     ManifestError,
     ProcessingIntent,
     SourceRegion,
+)
+from curator.artdirection.packing import (
+    Cell,
+    PackingError,
+    equal_cells,
+    gutter_for_target,
+    resolve_regions,
 )
 from curator.artdirection.policy import (
     ArtDirectionRequest,
@@ -24,15 +35,22 @@ from curator.artdirection.policy import (
 )
 
 __all__ = [
+    "MAX_LAYOUT_SOURCES",
+    "MULTI_CELL_TREATMENTS",
     "ArtDirectionManifest",
     "ArtDirectionRequest",
     "BackgroundSpec",
+    "Cell",
     "LayoutTreatment",
     "ManifestError",
+    "PackingError",
     "ProcessingIntent",
     "SourceRegion",
     "TreatmentProposal",
+    "equal_cells",
+    "gutter_for_target",
     "materialize_manifest",
     "propose",
     "propose_treatments",
+    "resolve_regions",
 ]

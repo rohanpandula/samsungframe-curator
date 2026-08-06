@@ -24,11 +24,13 @@ from typing import TYPE_CHECKING, Any
 from curator.analysis.schema import AnalysisResult
 from curator.artdirection.manifest import (
     MANIFEST_VERSION,
+    MAX_LAYOUT_SOURCES,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
-    SourceRegion,
+    ManifestError,
 )
+from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
 
 if TYPE_CHECKING:
     from curator.analysis.local import LocalAnalysisProvider
@@ -291,11 +293,33 @@ def materialize_manifest(
 ) -> ArtDirectionManifest:
     """Build an :class:`ArtDirectionManifest` from a chosen *proposal*.
 
-    Sources are recorded verbatim, one (default full) :class:`SourceRegion` per
-    source. A diptych sets ``pairing_order`` to the source order. A contain-matte
-    proposal carries its background choice through ``evidence`` and materializes
-    it into the manifest's :class:`BackgroundSpec`.
+    Sources are recorded verbatim with one
+    :class:`~curator.artdirection.manifest.SourceRegion` per source, carrying
+    real output-canvas-pixel geometry from
+    :func:`~curator.artdirection.packing.equal_cells` (M010/S01). This is the
+    first production writer of region geometry — before M010 every materialized
+    region was four zeros, i.e. unset. A diptych sets ``pairing_order`` to the
+    source order and is packed in that order. A contain-matte proposal carries
+    its background choice through ``evidence`` and materializes it into the
+    manifest's :class:`BackgroundSpec`.
+
+    The pack target is ``request.target_width`` / ``request.target_height``, so
+    the signature is deliberately unchanged: 01-PATTERNS.md sketched extra
+    ``target`` / ``weights`` parameters, which are unnecessary here because the
+    request already carries the dims and S01 packs at equal weight. M010/S03,
+    which adds a real weights path, is where that sketch becomes relevant.
+
+    Raises :class:`~curator.artdirection.manifest.ManifestError` when more than
+    :data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES` sources are given,
+    rather than materializing a manifest :meth:`ArtDirectionManifest.validate`
+    would reject.
     """
+    if len(sources_sha) > MAX_LAYOUT_SOURCES:
+        raise ManifestError(
+            f"cannot materialize a manifest for {len(sources_sha)} source(s), over the "
+            f"{MAX_LAYOUT_SOURCES}-source layout cap — an over-cap request is "
+            f"rejected, never truncated"
+        )
     reasons = list(rationale) if rationale is not None else list(proposal.rationale)
     treatment = proposal.treatment
     pairing_order = list(sources_sha) if treatment is LayoutTreatment.DIPTYCH else []
@@ -305,10 +329,16 @@ def materialize_manifest(
         background = BackgroundSpec(
             background_choice=str(choice) if choice is not None else "none"
         )
+    target = (request.target_width, request.target_height)
+    regions = equal_cells(
+        pairing_order or sources_sha,
+        Cell(0, 0, request.target_width, request.target_height),
+        gap=gutter_for_target(target),
+    )
     return ArtDirectionManifest(
         manifest_version=MANIFEST_VERSION,
         sources=list(sources_sha),
-        regions=[SourceRegion(source_sha256=sha) for sha in sources_sha],
+        regions=regions,
         layout_treatment=treatment,
         background=background,
         pairing_order=pairing_order,
