@@ -38,6 +38,13 @@ never reimplements business logic (MEM003 / MEM010 thin-handler rule):
   and a deterministic template ``rationale`` — the same shape
   ``curator taste embedding-explain`` prints. 503 when the embedding
   provider itself is unavailable.
+- ``GET /api/taste/compare``  — compare the lens and embedding heads over
+  recorded votes, with uncertainty (M009/S05): the same report
+  ``curator taste compare`` prints — held-out accuracy + promotion-gate
+  result per head, a discordant-pairs head-to-head accuracy with a 95%
+  confidence interval, a learning curve, and a verdict, never a path that
+  retires the lens head. 503 when the embedding provider is unavailable,
+  400 when fewer than two analyzed candidates exist yet.
 - ``GET /`` + ``/app``        — the review SPA (``webui/``) served by starlette
   ``StaticFiles``.
 - ``GET /consolidation-plan`` — a ``?path=`` directory inventory via
@@ -60,9 +67,11 @@ import dataclasses
 import json
 import re
 import tempfile
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -72,6 +81,7 @@ from curator.analysis.cli_utils import resolve_catalog_entry
 from curator.analysis.errors import AnalysisError, CatalogEntryNotFound
 from curator.analysis.local import LocalAnalysisProvider
 from curator.analysis.profiles import AnalysisProfile
+from curator.analysis.schema import AnalysisResult
 from curator.approve import ApprovalError, ApprovalService
 from curator.artdirection.manifest import ArtDirectionManifest, SourceRegion
 from curator.artdirection.policy import ArtDirectionRequest, propose_treatments
@@ -105,11 +115,14 @@ from curator.taste.dialogue.upstream import (
     profile_dimensions,
 )
 from curator.taste.embedding.attribution import attribute_score, find_exemplars, render_rationale
+from curator.taste.embedding.compare import HELD_OUT_FRACTION, compare_heads
 from curator.taste.embedding.errors import EmbeddingError
-from curator.taste.embedding.head import fit_embedding_head, resolve_vote_vectors
+from curator.taste.embedding.head import VoteVectors, fit_embedding_head, resolve_vote_vectors
 from curator.taste.embedding.provider import OnnxEmbeddingProvider
 from curator.taste.embedding.store import EmbeddingStore
-from curator.taste.store import TasteVoteStore, VoteRecord, next_pair
+from curator.taste.pairwise import Scorer
+from curator.taste.rank import TasteRanker
+from curator.taste.store import TasteVoteStore, VoteRecord, next_pair, resolve_vote_candidates
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
 HOST = "127.0.0.1"
@@ -969,6 +982,137 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             "contributions": attribution.contributions,
             "exemplars": [e.to_dict() for e in exemplars],
         }
+
+    # -- head-to-head comparison, with uncertainty (M009/S05) --------------------
+
+    def _compare_vector_by_asset_id(
+        catalog: Catalog,
+        candidates: list[dict[str, Any]],
+        analysis_map: dict[str, AnalysisResult],
+        embedding_store: EmbeddingStore,
+        model_version: str,
+    ) -> dict[str, np.ndarray]:
+        """Return ``{analysis.asset_id: vector}`` for every candidate with a stored embedding.
+
+        Mirrors the CLI's ``_taste_compare_vector_by_asset_id`` exactly (same
+        query, same shape) — the established per-surface duplication precedent
+        ``_entry_pair_info``/``_taste_pair_candidate`` and
+        ``_embedding_liked_shas``/``_taste_liked_shas`` already set. A
+        candidate lacking a stored vector is simply absent — the comparison's
+        embedding scorer treats a missing entry as ``0.0`` (no evidence),
+        never a crash.
+        """
+        entry_ids = [int(c["id"]) for c in candidates]
+        if not entry_ids:
+            return {}
+        placeholders = ",".join("?" for _ in entry_ids)
+        rows = catalog.db.execute(
+            f"SELECT id, sha256 FROM catalog_entries WHERE id IN ({placeholders})",
+            entry_ids,
+        ).fetchall()
+        sha_by_entry_id = {int(entry_id): str(sha) for entry_id, sha in rows}
+        vector_by_asset_id: dict[str, np.ndarray] = {}
+        for cid, analysis in analysis_map.items():
+            sha = sha_by_entry_id.get(int(cid))
+            if sha is None:
+                continue
+            stored = embedding_store.get(sha, model_version)
+            if stored is not None:
+                vector_by_asset_id[analysis.asset_id] = stored.vector
+        return vector_by_asset_id
+
+    def _compare_embedding_scorer_factory(
+        vector_by_asset_id: dict[str, np.ndarray], model_version: str
+    ) -> Callable[[Sequence[VoteVectors]], Scorer]:
+        """Return a ``training-votes-subset -> Scorer`` factory for ``compare_heads``.
+
+        Refits ``fit_embedding_head`` fresh for whichever vote subset it is
+        called with — the full training set, or one of ``compare_heads``'s
+        learning-curve checkpoints — so ``compare.py`` itself never needs to
+        know about ``EmbeddingStore``/``model_version`` (it stays a pure
+        statistics module).
+        """
+
+        def factory(votes_subset: Sequence[VoteVectors]) -> Scorer:
+            head = fit_embedding_head(votes_subset, model_version)
+
+            def scorer(analysis: AnalysisResult) -> float:
+                vector = vector_by_asset_id.get(analysis.asset_id)
+                return head.score(vector) if vector is not None else 0.0
+
+            return scorer
+
+        return factory
+
+    @app.get("/api/taste/compare")
+    def taste_compare(request: Request) -> dict:
+        """Compare the lens and embedding heads over recorded votes, with uncertainty.
+
+        Same pipeline as ``curator taste compare``: splits the non-retracted
+        vote history into training/held-out (``HELD_OUT_FRACTION``,
+        most-recent votes held out — deterministic, chronological), fits the
+        lens scorer over the current persisted profile and the embedding
+        scorer fresh over the training votes, evaluates both against the
+        held-out set via ``compare_heads``, and returns the full report. 503
+        when the embedding provider itself is unavailable (mirrors
+        ``taste_embedding_explain``'s posture); 400 when fewer than two
+        analyzed candidates exist yet — nothing to compare, not a server
+        failure.
+        """
+        catalog = _catalog(request)
+        provider = OnnxEmbeddingProvider()
+        probe = provider.probe()
+        if not probe.ok:
+            raise HTTPException(status_code=503, detail=probe.message)
+        candidates, analysis_map = resolve_vote_candidates(catalog)
+        if len(candidates) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail="fewer than two analyzed candidates — nothing to compare yet",
+            )
+        all_votes = [v for v in TasteVoteStore(catalog).votes() if not v.retracted]
+        n_held_out = max(1, round(len(all_votes) * HELD_OUT_FRACTION))
+        split_index = len(all_votes) - n_held_out
+        training_records = all_votes[:split_index]
+        held_out_records = all_votes[split_index:]
+        # A held-out vote's winner/loser must still be a current analyzed
+        # candidate — a vote can outlive its entry's analysis (re-analysis,
+        # deletion); skip rather than KeyError deep inside evaluate().
+        analyzed_ids = set(analysis_map)
+        held_out_pairs = [
+            (str(v.winner_entry_id), str(v.loser_entry_id), str(v.winner_entry_id))
+            for v in held_out_records
+            if str(v.winner_entry_id) in analyzed_ids and str(v.loser_entry_id) in analyzed_ids
+        ]
+        embedding_store = EmbeddingStore(catalog)
+        training_votes = resolve_vote_vectors(
+            training_records, embedding_store, provider.model_version
+        )
+        vector_by_asset_id = _compare_vector_by_asset_id(
+            catalog, candidates, analysis_map, embedding_store, provider.model_version
+        )
+        current_profile = TasteVoteStore(catalog).load_profile()
+        ranker = TasteRanker()
+
+        def lens_scorer(analysis: AnalysisResult) -> float:
+            return ranker.personal_delta(analysis, current_profile)[0]
+
+        def baseline_scorer(analysis: AnalysisResult) -> float:
+            return 0.0
+
+        embedding_scorer_factory = _compare_embedding_scorer_factory(
+            vector_by_asset_id, provider.model_version
+        )
+        comparison = compare_heads(
+            training_votes,
+            held_out_pairs,
+            candidates,
+            analysis_map,
+            lens_scorer,
+            embedding_scorer_factory,
+            baseline_scorer,
+        )
+        return comparison.to_dict()
 
     @app.post("/api/taste/explain")
     def taste_explain(body: AnalyzeRequest, request: Request) -> dict:
