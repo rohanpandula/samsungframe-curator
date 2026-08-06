@@ -54,6 +54,23 @@ class AttributionResult:
     def to_dict(self) -> dict[str, Any]:
         return {"score": self.score, "contributions": [dict(c) for c in self.contributions]}
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AttributionResult:
+        """Round-trip inverse of :meth:`to_dict` (IN-02).
+
+        Not on any persistence path in this milestone (this result is always
+        freshly computed, never deserialized) — added for symmetry with every
+        other frozen dataclass this phase touches (``EmbeddingHead``,
+        ``HeadComparison``, ``PairwiseEvidence``), matching CLAUDE.md's stated
+        frozen-dataclass ``to_dict``/``from_dict`` round-trip convention.
+        """
+        if isinstance(data, cls):
+            return data
+        return cls(
+            score=float(data["score"]),
+            contributions=[dict(c) for c in data.get("contributions", [])],
+        )
+
 
 def attribute_score(
     vector: np.ndarray, head: EmbeddingHead, votes: Sequence[VoteVectors]
@@ -104,6 +121,19 @@ class ExemplarResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {"sha256": self.sha256, "entry_id": self.entry_id, "similarity": self.similarity}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ExemplarResult:
+        """Round-trip inverse of :meth:`to_dict` (IN-02) — see
+        :meth:`AttributionResult.from_dict`'s docstring for why this exists
+        despite never being persisted in this milestone."""
+        if isinstance(data, cls):
+            return data
+        return cls(
+            sha256=str(data["sha256"]),
+            entry_id=int(data["entry_id"]),
+            similarity=float(data["similarity"]),
+        )
 
 
 def find_exemplars(

@@ -9,6 +9,7 @@ with the same raw-SQL idiom already established in ``tests/test_taste_embedding_
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -103,6 +104,31 @@ def test_attribute_score_contribution_keys_match_the_contract() -> None:
         assert contribution["winner_entry_id"] == vote.winner_entry_id
         assert contribution["loser_entry_id"] == vote.loser_entry_id
         assert isinstance(contribution["contribution"], float)
+
+
+# ---------------------------------------------------------------------------
+# IN-02: to_dict / from_dict round trips
+# ---------------------------------------------------------------------------
+
+
+def test_attribution_result_to_dict_from_dict_round_trip() -> None:
+    votes = _synthetic_votes(3)
+    head = fit_embedding_head(votes, "v1")
+    vector = np.ones(EMBEDDING_DIM, dtype=np.float32)
+    result = attribute_score(vector, head, votes)
+
+    rebuilt = AttributionResult.from_dict(json.loads(json.dumps(result.to_dict())))
+
+    assert rebuilt.score == result.score
+    assert rebuilt.contributions == result.contributions
+
+
+def test_exemplar_result_to_dict_from_dict_round_trip() -> None:
+    exemplar = ExemplarResult(sha256="a" * 64, entry_id=7, similarity=0.42)
+
+    rebuilt = ExemplarResult.from_dict(json.loads(json.dumps(exemplar.to_dict())))
+
+    assert rebuilt == exemplar
 
 
 # ---------------------------------------------------------------------------
