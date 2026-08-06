@@ -28,6 +28,10 @@ never reimplements business logic (MEM003 / MEM010 thin-handler rule):
   candidates remain; ``POST /api/taste/vote`` answers it (409 if the pair
   changed since it was fetched), ``GET /api/taste/votes`` lists every recorded
   vote, and ``POST /api/taste/retract`` reverses one without deleting it.
+- ``GET /api/taste/embedding-status`` — whether the local embedding subsystem
+  (M009/S02) is usable, with no network call either way; read-only (no
+  ``--backfill`` equivalent over HTTP — that bulk-recompute loop is a
+  CLI-only maintenance operation).
 - ``GET /`` + ``/app``        — the review SPA (``webui/``) served by starlette
   ``StaticFiles``.
 - ``GET /consolidation-plan`` — a ``?path=`` directory inventory via
@@ -94,6 +98,7 @@ from curator.taste.dialogue.upstream import (
     explain_rank,
     profile_dimensions,
 )
+from curator.taste.embedding.provider import OnnxEmbeddingProvider
 from curator.taste.store import TasteVoteStore, next_pair
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
@@ -867,6 +872,21 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             "vote_group": body.vote_group,
             "profile_version": store.load_profile().version,
         }
+
+    # -- embedding provider status (M009/S02) ------------------------------------
+
+    @app.get("/api/taste/embedding-status")
+    def taste_embedding_status() -> dict:
+        """Report whether the local embedding subsystem is usable, with no network call.
+
+        Read-only — no ``--backfill`` equivalent over HTTP; a bulk-recompute loop
+        is a CLI-only maintenance operation (avoids adding a long-running
+        synchronous mutation route to a loopback API for a milestone that does
+        not otherwise need a background-job story — a scope decision, not an
+        oversight).
+        """
+        probe = OnnxEmbeddingProvider().probe()
+        return {"ok": probe.ok, "backend": probe.backend.value, "message": probe.message}
 
     @app.post("/api/taste/explain")
     def taste_explain(body: AnalyzeRequest, request: Request) -> dict:
