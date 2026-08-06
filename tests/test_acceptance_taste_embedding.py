@@ -59,6 +59,7 @@ from curator.taste.embedding.head import VoteVectors, fit_embedding_head
 from curator.taste.embedding.provider import EMBEDDING_DIM, OnnxEmbeddingProvider
 from curator.taste.embedding.store import EmbeddingStore, cosine_similarity
 from curator.taste.pairwise import Scorer
+from curator.taste.profiles import TasteProfileKind, default_profile
 from curator.taste.store import TasteVoteStore, next_pair
 
 FIXTURE_MODEL = Path(__file__).parent / "fixtures" / "tiny_embedding_model.onnx"
@@ -164,6 +165,9 @@ def test_acceptance_taste_embedding_vote_cast_retract_preserves_history(data_roo
         store = TasteVoteStore(catalog)
         fresh_install = store.load_profile()
         assert fresh_install.version == 1  # the fresh-install value
+        # zero votes reproduce the exact baseline profile (explicit equality, not
+        # just a version check) — the R039/R038 zero-vote-means-baseline contract.
+        assert fresh_install == default_profile(TasteProfileKind.PERSONAL)
 
         pair = next_pair(catalog)
         assert pair is not None
