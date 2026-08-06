@@ -51,6 +51,10 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                no network call either way; ``--backfill``
                                computes and stores vectors for every catalog
                                entry lacking a current-model-version embedding.
+                               A per-entry failure is recorded
+                               (``backfill_error_count``/``backfill_errors``)
+                               and the run continues past it, never aborting
+                               the whole backfill on one bad entry.
                                Always exits 0 once the probe runs — this is the
                                milestone's documented early-exit checkpoint.
 - ``curator taste embedding-head [--json]`` — fit the nonparametric
@@ -131,7 +135,7 @@ from curator.config import CuratorConfig
 from curator.connectors.local import LocalConnector
 from curator.consolidate import ConsolidationExecutor, ConsolidationPlan, build_plan
 from curator.content_store import ContentStore
-from curator.errors import CuratorError
+from curator.errors import CuratorError, StorageError
 from curator.hashing import sha256_hex
 from curator.ingest.pipeline import IngestPipeline
 from curator.ingest.report import IngestReport
@@ -163,6 +167,7 @@ from curator.taste.embedding.compare import (
     MIN_DISCORDANT_PAIRS,
     compare_heads,
 )
+from curator.taste.embedding.errors import EmbeddingError
 from curator.taste.embedding.head import (
     VoteVectors,
     fit_embedding_head,
@@ -1636,10 +1641,15 @@ def _taste_embed_status(args: argparse.Namespace) -> int:
     Constructs :class:`~curator.taste.embedding.provider.OnnxEmbeddingProvider`
     with default path resolution and calls :meth:`probe`. With ``--backfill`` and
     a passing probe, computes + stores a vector for every catalog entry lacking
-    one under the current model version. Always exits :data:`EXIT_OK` once the
-    probe runs — even ``ok=False`` is a successful *report*, not a CLI failure;
-    this command's whole job is to answer "is this available", which is the
-    milestone's documented early-exit checkpoint.
+    one under the current model version. A per-entry failure (missing content,
+    or the model file swapped/corrupted mid-loop — the same T-09-05 scenario the
+    embedding-explain routes guard against) is recorded and the loop continues
+    (WR-06), mirroring the established ``IngestReport``/``AnalysisRunReport``
+    per-item ``corrupt``/``error`` posture rather than aborting the whole run and
+    discarding every already-successful entry's report. Always exits
+    :data:`EXIT_OK` once the probe runs — even ``ok=False`` is a successful
+    *report*, not a CLI failure; this command's whole job is to answer "is this
+    available", which is the milestone's documented early-exit checkpoint.
     """
     provider = OnnxEmbeddingProvider()
     probe = provider.probe()
@@ -1649,6 +1659,7 @@ def _taste_embed_status(args: argparse.Namespace) -> int:
         "message": probe.message,
     }
     computed = 0
+    errors: list[dict[str, str]] = []
     if probe.ok and args.backfill:
         catalog = Catalog()
         try:
@@ -1657,13 +1668,19 @@ def _taste_embed_status(args: argparse.Namespace) -> int:
                 sha = entry["sha256"]
                 if store.get(sha, provider.model_version) is not None:
                     continue
-                data = catalog.content.get(sha)
-                vector = provider.embed(data)
-                store.set(sha, provider.model_version, vector)
+                try:
+                    data = catalog.content.get(sha)
+                    vector = provider.embed(data)
+                    store.set(sha, provider.model_version, vector)
+                except (StorageError, EmbeddingError) as exc:
+                    errors.append({"sha256": sha, "error": str(exc)})
+                    continue
                 computed += 1
         finally:
             catalog.db.close()
         result["backfilled"] = computed
+        result["backfill_error_count"] = len(errors)
+        result["backfill_errors"] = errors
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     else:
@@ -1671,6 +1688,10 @@ def _taste_embed_status(args: argparse.Namespace) -> int:
         print(f"  {result['message']}")
         if probe.ok and args.backfill:
             print(f"  backfilled {computed} embedding(s)")
+            if errors:
+                print(f"  {len(errors)} entry(ies) failed to backfill:")
+                for err in errors:
+                    print(f"    {err['sha256'][:12]} — {err['error']}")
     return EXIT_OK
 
 
