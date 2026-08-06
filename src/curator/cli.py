@@ -85,7 +85,10 @@ from curator.ingest.report import IngestReport
 from curator.render.renderer import DeterministicRenderer, RenderError, RenderResult
 from curator.render.validate import ArtifactValidator, ValidationReport
 from curator.scan import ScanDiff, scan_connector
-from curator.taste.dialogue.extraction import resolve_extraction_provider
+from curator.taste.dialogue.extraction import (
+    extraction_config_from_env,
+    resolve_extraction_provider,
+)
 from curator.taste.dialogue.observation import create_observation
 from curator.taste.dialogue.profile import (
     ColdStartSeeder,
@@ -1369,16 +1372,10 @@ def _format_taste_profile(profile: DialogueProfile) -> str:
 def _taste_extraction_config() -> dict[str, Any] | None:
     """Return the taste extraction provider config from env, or ``None`` when off.
 
-    Cloud extraction is opt-in: ``CURATOR_TASTE_EXTRACTION_ENABLED``
-    (``1``/``true``/``yes``/``on``) with ``CURATOR_TASTE_EXTRACTION_PROVIDER``
-    (``cloud``/``local``, default ``cloud``). The Reaction Room is unavailable when
-    nothing is enabled — it never degrades to keyword matching.
+    Shared with the API surface so both gate identically — see
+    :func:`~curator.taste.dialogue.extraction.extraction_config_from_env`.
     """
-    enabled = os.environ.get("CURATOR_TASTE_EXTRACTION_ENABLED", "").strip().lower()
-    if enabled not in ("1", "true", "yes", "on"):
-        return None
-    provider = os.environ.get("CURATOR_TASTE_EXTRACTION_PROVIDER", "cloud").strip().lower()
-    return {"enabled": True, "provider": provider}
+    return extraction_config_from_env()
 
 
 def _taste_drop(args: argparse.Namespace) -> int:

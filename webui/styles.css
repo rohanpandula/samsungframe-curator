@@ -509,3 +509,122 @@ a:focus-visible,
     grid-template-columns: 1fr;
   }
 }
+
+/* -- taste dialogue (M008/S07) --------------------------------------------- */
+
+.taste {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+  padding: 1rem 1.25rem;
+}
+
+.taste .panel {
+  margin-top: 0;
+  padding: 1rem 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.taste h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.taste textarea {
+  width: 100%;
+  padding: 0.5rem;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  resize: vertical;
+}
+
+.taste-question {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-2);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+}
+
+.taste-learned {
+  margin-top: 0.75rem;
+}
+
+.taste-learned h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.taste-learned pre {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface-2);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font: inherit;
+  color: var(--muted);
+}
+
+.taste-vocabulary,
+.taste-claims,
+.taste-evolution {
+  margin: 0 0 0.5rem;
+  padding-left: 1.1rem;
+}
+
+.taste-word,
+.taste-evolution-entry {
+  font-size: 0.85rem;
+  padding: 0.1rem 0;
+}
+
+.taste-claim {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+  list-style: none;
+  margin-left: -1.1rem;
+}
+
+.taste-claim-text {
+  margin: 0 0 0.25rem;
+}
+
+.taste-claim-meta {
+  margin: 0 0 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.taste-evidence {
+  margin: 0 0 0.5rem;
+  padding-left: 1rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.taste-evidence-sha {
+  margin-right: 0.4rem;
+  color: var(--accent);
+}
+
+.taste-evidence-quote {
+  color: var(--fg);
+}
+
+.taste-claim-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 840px) {
+  .taste {
+    grid-template-columns: 1fr;
+  }
+}

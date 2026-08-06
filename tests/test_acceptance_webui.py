@@ -26,6 +26,7 @@ This gate covers the SPA + review/analyze/propose/render/validate endpoints:
 
 from __future__ import annotations
 
+import base64
 import io
 
 from fastapi.testclient import TestClient
@@ -240,3 +241,179 @@ def test_webui_a11y_markup(data_root):
 
     assert 'src="/app/app.js"' in text
     assert 'href="/app/styles.css"' in text
+
+
+# ---------------------------------------------------------------------------
+# W6 — the Taste Dialogue web surface (M008/S07, R032/R035/R036)
+# ---------------------------------------------------------------------------
+
+
+def _taste_client(data_root, monkeypatch):
+    """A TestClient with cloud taste-extraction opted in (synthetic runtime)."""
+    monkeypatch.setenv("CURATOR_TASTE_EXTRACTION_ENABLED", "1")
+    return _client(data_root)
+
+
+def test_webui_taste_drop_react_and_profile(data_root, monkeypatch):
+    """Drop an image, react in plain language, and read the profile it builds."""
+    client = _taste_client(data_root, monkeypatch)
+    encoded = base64.b64encode(_png(640, 480)).decode()
+
+    empty = client.get("/api/taste/profile").json()
+    assert empty["patterns"] == []
+    assert empty["citations"] == []
+    assert empty["dimensions"] == []
+
+    first = client.post(
+        "/api/taste/drop",
+        json={"images": [encoded], "note": "i love the quiet negative space"},
+    )
+    assert first.status_code == 200
+    turn = first.json()
+    # The user's words are stored byte-exact and the reaction earns one probe.
+    assert turn["observation"]["verbatim"] == "i love the quiet negative space"
+    assert turn["observation"]["attributes"]
+    assert turn["followups_asked"] <= 2
+    # No silent learning: the turn reports what it added.
+    assert turn["learned"]["summary"]
+    assert turn["learned"]["added"]
+
+    client.post(
+        "/api/taste/drop",
+        json={"images": [encoded], "note": "so much negative space, very quiet"},
+    )
+
+    profile = client.get("/api/taste/profile").json()
+    assert profile["vocabulary"]["quiet"]["usage_count"] >= 2
+    assert profile["patterns"]
+    claim = profile["patterns"][0]
+    # Every claim opens its evidence.
+    assert claim["evidence"]
+    assert all(ref["image_sha"] and ref["verbatim"] for ref in claim["evidence"])
+    assert profile["evolution"]
+    # The profile quotes the user, in their own words.
+    assert profile["citations"]
+    assert profile["citations"][0]["quote"] in {
+        "i love the quiet negative space",
+        "so much negative space, very quiet",
+    }
+
+
+def test_webui_taste_pin_edit_dispute_timeline(data_root, monkeypatch):
+    """Pin, edit, and dispute persist on an append-only timeline over HTTP."""
+    client = _taste_client(data_root, monkeypatch)
+    encoded = base64.b64encode(_png(640, 480)).decode()
+    for note in ("i love the quiet negative space", "so much negative space"):
+        client.post("/api/taste/drop", json={"images": [encoded], "note": note})
+
+    claim_id = client.get("/api/taste/profile").json()["patterns"][0]["id"]
+
+    assert client.post("/api/taste/pin", json={"claim_id": claim_id}).status_code == 200
+    edited = client.post(
+        "/api/taste/edit", json={"claim_id": claim_id, "text": "I prefer breathing room."}
+    )
+    assert edited.status_code == 200
+    assert edited.json()["event"]["kind"] == "edit"
+
+    after_edit = client.get("/api/taste/profile").json()
+    edited_claim = next(c for c in after_edit["patterns"] if c["id"] == claim_id)
+    assert edited_claim["text"] == "I prefer breathing room."
+    assert edited_claim["status"] == "edited"
+
+    disputed = client.post("/api/taste/dispute", json={"claim_id": claim_id})
+    assert disputed.status_code == 200
+    assert "re-interpretation" in disputed.json()["event"]["detail"]
+
+    after = client.get("/api/taste/profile").json()
+    assert claim_id not in {c["id"] for c in after["patterns"]}
+    assert [e["kind"] for e in after["timeline"]] == ["pin", "edit", "dispute"]
+    # A dispute silences the citation too.
+    assert claim_id not in {c["claim_id"] for c in after["citations"]}
+
+    # A claim the profile never made cannot be disputed.
+    assert client.post("/api/taste/dispute", json={"claim_id": "pattern:nope"}).status_code == 404
+
+
+def test_webui_taste_explanation_cites_the_profile(data_root, tmp_path, monkeypatch):
+    """R036 live: the rerank explanation quotes the profile, and is baseline when empty."""
+    client = _taste_client(data_root, monkeypatch)
+    catalog = Catalog(data_root=data_root)
+    try:
+        _asset, sha = _cataloged(catalog, tmp_path)
+    finally:
+        catalog.db.close()
+
+    baseline = client.post("/api/taste/explain", json={"asset": sha})
+    assert baseline.status_code == 200
+    assert baseline.json()["citations"] == []
+
+    encoded = base64.b64encode(_png(640, 480)).decode()
+    for note in ("i love the quiet negative space", "so much negative space"):
+        client.post("/api/taste/drop", json={"images": [encoded], "note": note})
+
+    cited = client.post("/api/taste/explain", json={"asset": sha}).json()
+    assert cited["citations"]
+    assert cited["citations"][0]["quote"] in cited["rationale"]
+
+
+def test_webui_taste_retention_and_explicit_save(data_root, monkeypatch):
+    """R034 over HTTP: drops are thumb + hash only until save=true."""
+    client = _taste_client(data_root, monkeypatch)
+    data = _png(640, 480, (10, 90, 140))
+    encoded = base64.b64encode(data).decode()
+    sha = sha256_hex(data)
+
+    client.post("/api/taste/drop", json={"images": [encoded], "note": "quiet and empty"})
+    catalog = Catalog(data_root=data_root)
+    try:
+        assert catalog.get_by_hash(sha) == []
+    finally:
+        catalog.db.close()
+
+    client.post(
+        "/api/taste/drop",
+        json={"images": [encoded], "note": "still quiet", "save": True},
+    )
+    catalog = Catalog(data_root=data_root)
+    try:
+        assert catalog.get_by_hash(sha)
+    finally:
+        catalog.db.close()
+
+
+def test_webui_taste_unavailable_without_a_model(data_root, monkeypatch):
+    """R033 over HTTP: no provider -> 503, and nothing is recorded."""
+    monkeypatch.delenv("CURATOR_TASTE_EXTRACTION_ENABLED", raising=False)
+    client = _client(data_root)
+    encoded = base64.b64encode(_png(640, 480)).decode()
+
+    response = client.post(
+        "/api/taste/drop", json={"images": [encoded], "note": "quiet and empty"}
+    )
+    assert response.status_code == 503
+    assert "extraction provider" in response.json()["detail"]
+
+    # It never guesses: no observation, no profile claim.
+    assert client.get("/api/taste/profile").json()["patterns"] == []
+
+    assert client.post("/api/taste/drop", json={"note": "nothing dropped"}).status_code == 400
+
+
+def test_webui_taste_a11y_markup(data_root):
+    """The Taste section carries its nav entry, landmarks, and labeled controls."""
+    text = _client(data_root).get("/").text
+
+    assert 'id="nav-taste"' in text
+    assert 'id="taste-view"' in text
+    assert 'id="reaction-room"' in text
+    assert 'id="taste-profile"' in text
+    assert 'aria-labelledby="reaction-room-heading"' in text
+    assert 'aria-labelledby="taste-profile-heading"' in text
+
+    for heading in ("Reaction Room", "Taste Profile", "Vocabulary", "Patterns",
+                    "Tensions", "Evolution", "What I learned"):
+        assert heading in text
+
+    assert 'for="taste-note"' in text
+    assert 'for="taste-files"' in text
+    assert 'id="taste-room-status"' in text

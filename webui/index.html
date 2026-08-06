@@ -23,6 +23,7 @@
     <nav aria-label="Sections">
       <a href="#catalog" id="nav-catalog" aria-current="page">Catalog</a>
       <a href="#review" id="nav-review">Review</a>
+      <a href="#taste" id="nav-taste">Taste</a>
     </nav>
   </header>
 
@@ -108,6 +109,68 @@
       </div>
       <ul id="review-list" class="review-list"></ul>
     </section>
+
+    <div id="taste-view" class="taste" hidden>
+      <section id="reaction-room" class="panel" aria-labelledby="reaction-room-heading">
+        <h2 id="reaction-room-heading">Reaction Room</h2>
+        <p class="muted">
+          Drop any images — your own or someone else's — and say what you think in
+          your own words. Third-party images are kept as a thumbnail and a hash
+          only, unless you choose to save them.
+        </p>
+        <div class="action-row">
+          <label for="taste-files">Images</label>
+          <input type="file" id="taste-files" name="taste-files" accept="image/*" multiple>
+        </div>
+        <div class="action-row">
+          <label for="taste-note">Your reaction</label>
+          <textarea id="taste-note" name="taste-note" rows="3"
+            placeholder="What do you notice? Say it however you'd say it out loud."></textarea>
+        </div>
+        <div class="action-row">
+          <label for="taste-save">
+            <input type="checkbox" id="taste-save" name="taste-save">
+            Also save these images to the catalog at full resolution
+          </label>
+        </div>
+        <div class="action-row action-buttons">
+          <button type="button" id="taste-submit" class="btn primary">React</button>
+        </div>
+        <p id="taste-room-status" class="status-text muted" role="status" aria-live="polite"></p>
+        <div id="taste-turn" hidden>
+          <p id="taste-question" class="taste-question"></p>
+          <div id="taste-learned" class="taste-learned" aria-live="polite">
+            <h3>What I learned</h3>
+            <pre id="taste-learned-body"></pre>
+          </div>
+        </div>
+      </section>
+
+      <section id="taste-profile" class="panel" aria-labelledby="taste-profile-heading">
+        <h2 id="taste-profile-heading">Taste Profile</h2>
+        <p id="taste-profile-status" class="status-text muted" role="status" aria-live="polite"></p>
+
+        <section aria-labelledby="taste-vocabulary-heading">
+          <h3 id="taste-vocabulary-heading">Vocabulary</h3>
+          <ul id="taste-vocabulary" class="taste-vocabulary"></ul>
+        </section>
+
+        <section aria-labelledby="taste-patterns-heading">
+          <h3 id="taste-patterns-heading">Patterns</h3>
+          <ul id="taste-patterns" class="taste-claims"></ul>
+        </section>
+
+        <section aria-labelledby="taste-tensions-heading">
+          <h3 id="taste-tensions-heading">Tensions</h3>
+          <ul id="taste-tensions" class="taste-claims"></ul>
+        </section>
+
+        <section aria-labelledby="taste-evolution-heading">
+          <h3 id="taste-evolution-heading">Evolution</h3>
+          <ol id="taste-evolution" class="taste-evolution"></ol>
+        </section>
+      </section>
+    </div>
   </main>
 
   <div id="message" class="toast" role="alert" aria-live="assertive"></div>

@@ -17,6 +17,7 @@ never originals, secrets, GPS, or faces (M006 privacy shape).
 from __future__ import annotations
 
 import io
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -550,6 +551,22 @@ def _coerce_polarity(value: Any) -> Polarity:
         raise ValueError(f"invalid polarity {value!r}") from exc
 
 
+def extraction_config_from_env() -> dict[str, Any] | None:
+    """Return the extraction provider config from the environment, or ``None``.
+
+    Cloud extraction is opt-in: ``CURATOR_TASTE_EXTRACTION_ENABLED``
+    (``1``/``true``/``yes``/``on``) with ``CURATOR_TASTE_EXTRACTION_PROVIDER``
+    (``cloud``/``local``, default ``cloud``). Shared by the CLI and the API so
+    both surfaces are gated identically — the Reaction Room is unavailable when
+    nothing is enabled and never degrades to keyword matching.
+    """
+    enabled = os.environ.get("CURATOR_TASTE_EXTRACTION_ENABLED", "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return None
+    provider = os.environ.get("CURATOR_TASTE_EXTRACTION_PROVIDER", "cloud").strip().lower()
+    return {"enabled": True, "provider": provider}
+
+
 __all__ = [
     "CONTROLLED_VOCABULARY",
     "CloudExtractionProvider",
@@ -561,6 +578,7 @@ __all__ = [
     "LocalExtractionSlot",
     "SyntheticExtractionRuntime",
     "extract_or_unavailable",
+    "extraction_config_from_env",
     "extraction_default_disclosure",
     "resolve_extraction_provider",
 ]

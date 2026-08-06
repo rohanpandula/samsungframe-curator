@@ -293,8 +293,18 @@ def test_low_provenance_claims_are_demoted_to_corroborating():
 # -- consumers ---------------------------------------------------------------
 
 
-def test_explain_rank_with_no_lens_profile_is_the_baseline():
+def test_explain_rank_with_no_lens_profile_still_cites_the_taste_profile():
+    """An inert M007 lens means no rerank — the profile still has something to say."""
     explanation = explain_rank(_analysis(), None, _dialogue_profile())
+    assert explanation.delta == 0.0
+    assert explanation.evidence == []
+    assert "baseline" in explanation.rationale
+    assert explanation.citations
+    assert explanation.citations[0].quote in explanation.rationale
+
+
+def test_explain_rank_with_no_lens_and_no_profile_is_the_bare_baseline():
+    explanation = explain_rank(_analysis(), None, None)
     assert explanation.citations == []
     assert explanation.delta == 0.0
     assert "baseline" in explanation.rationale

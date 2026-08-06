@@ -17,6 +17,12 @@ never reimplements business logic (MEM003 / MEM010 thin-handler rule):
 - ``GET /api/review``         — catalog entries with their current approval
   decision, plus ``POST /api/review/{approve,reject,undo}`` to record/revert
   decisions via :class:`~curator.approve.ApprovalService`.
+- ``GET /api/taste/profile``  — the Taste Profile document (vocabulary / patterns /
+  tensions / evolution) plus its quotable ``citations``, ``dimensions``, and the
+  pin/edit/dispute ``timeline``; ``POST /api/taste/drop`` records one Reaction
+  Room turn (503 when no extraction provider is enabled — it never guesses), and
+  ``POST /api/taste/{pin,edit,dispute}`` applies a correction to one claim.
+  ``POST /api/taste/explain`` returns the rerank explanation citing the profile.
 - ``GET /`` + ``/app``        — the review SPA (``webui/``) served by starlette
   ``StaticFiles``.
 - ``GET /consolidation-plan`` — a ``?path=`` directory inventory via
@@ -35,8 +41,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import json
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -55,11 +63,33 @@ from curator.artdirection.policy import ArtDirectionRequest, propose_treatments
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.consolidate.plan import build_plan
-from curator.errors import StorageError
+from curator.errors import CuratorError, StorageError
 from curator.hashing import sha256_hex
 from curator.ingest.pipeline import IngestPipeline
 from curator.render.renderer import DeterministicRenderer, RenderError, RenderResult
 from curator.render.validate import ArtifactValidator
+from curator.taste.dialogue.extraction import (
+    extraction_config_from_env,
+    resolve_extraction_provider,
+)
+from curator.taste.dialogue.profile import (
+    ColdStartSeeder,
+    ProfileBuilder,
+    ProfileEvent,
+    ProfileStore,
+    TasteClaim,
+    TasteProfile,
+    WhatILearned,
+)
+from curator.taste.dialogue.retention import save_to_catalog
+from curator.taste.dialogue.room import ReactionRoom, ReactionRoomUnavailableError
+from curator.taste.dialogue.store import ObservationStore
+from curator.taste.dialogue.upstream import (
+    citations_for,
+    explain_rank,
+    profile_dimensions,
+)
+from curator.taste.profiles import default_profile
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
 HOST = "127.0.0.1"
@@ -156,6 +186,32 @@ class ValidateRequest(BaseModel):
     target_height: int | None = None
     color_mode: str = "RGB"
     color_profile: str = "sRGB"
+
+
+class TasteDropRequest(BaseModel):
+    """JSON request body for ``POST /api/taste/drop``.
+
+    ``images`` carries base64-encoded third-party drops (retained as thumbnail +
+    hash only) and ``shas`` names already-cataloged content; at least one is
+    required. ``note`` is the user's reaction in their own words — stored
+    verbatim. ``save`` is the explicit choice that promotes the dropped images
+    into the catalog at full resolution.
+    """
+
+    images: list[str] = []
+    shas: list[str] = []
+    note: str = ""
+    save: bool = False
+
+
+class TasteClaimRequest(BaseModel):
+    """JSON request body for ``POST /api/taste/{pin,edit,dispute}``.
+
+    ``text`` is the replacement wording and is required only for ``edit``.
+    """
+
+    claim_id: str
+    text: str = ""
 
 
 def create_app(catalog: Catalog | None = None) -> FastAPI:
@@ -535,6 +591,178 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             color_profile=body.color_profile,
         )
         return report.to_dict()
+
+    # -- taste dialogue surface (M008/S07) ---------------------------------------
+
+    def _taste_profile_document(catalog: Catalog, *, seed: bool = True) -> TasteProfile:
+        """Rebuild the profile from observations and replay its correction timeline.
+
+        Mirrors the CLI's read path exactly: derive from the append-only
+        observation journal, optionally append the low-provenance cold-start
+        claims, then re-apply pin/edit/dispute so corrections survive a rebuild.
+        """
+        profile = ProfileBuilder().build(ObservationStore(catalog).all())
+        if seed:
+            profile = ColdStartSeeder(catalog).seed(profile)
+        for event in ProfileStore(catalog).events():
+            profile = _replay_profile_event(profile, event)
+        return profile
+
+    def _replay_profile_event(profile: TasteProfile, event: ProfileEvent) -> TasteProfile:
+        """Re-apply one timeline event to a freshly rebuilt profile."""
+        if event.kind == "dispute":
+            return dataclasses.replace(
+                profile,
+                patterns=[c for c in profile.patterns if c.id != event.claim_id],
+                tensions=[c for c in profile.tensions if c.id != event.claim_id],
+            )
+        if event.kind == "pin":
+            def apply(claim: TasteClaim) -> TasteClaim:
+                return dataclasses.replace(claim, status="pinned")
+        else:
+            def apply(claim: TasteClaim) -> TasteClaim:
+                return dataclasses.replace(claim, text=event.detail, status="edited")
+        return dataclasses.replace(
+            profile,
+            patterns=[apply(c) if c.id == event.claim_id else c for c in profile.patterns],
+            tensions=[apply(c) if c.id == event.claim_id else c for c in profile.tensions],
+        )
+
+    def _taste_room(catalog: Catalog) -> ReactionRoom:
+        """Build a ReactionRoom over the env-gated extraction provider."""
+        provider = resolve_extraction_provider(extraction_config_from_env())
+        return ReactionRoom(catalog, provider, catalog.content.root)
+
+    @app.get("/api/taste/profile")
+    def taste_profile(request: Request, seed: bool = True) -> dict:
+        """Return the taste profile document plus its quotable citations.
+
+        ``seed=false`` omits the low-provenance approval/pairwise history claims.
+        ``citations`` is what an explanation would quote — the profile's own
+        words, high-provenance first; it is empty for an empty profile.
+        """
+        profile = _taste_profile_document(_catalog(request), seed=seed)
+        payload = profile.to_dict()
+        payload["citations"] = [c.to_dict() for c in citations_for(profile)]
+        payload["dimensions"] = list(profile_dimensions(profile))
+        payload["timeline"] = [e.to_dict() for e in ProfileStore(_catalog(request)).events()]
+        return payload
+
+    @app.post("/api/taste/drop")
+    def taste_drop(body: TasteDropRequest, request: Request) -> dict:
+        """Record one Reaction Room turn over the dropped image(s).
+
+        Images arrive as base64 ``images`` (third-party drops, retained as
+        thumbnail + hash) and/or catalog ``shas``. Returns the observation, the
+        single probing question this reaction earned, and the "What I learned"
+        delta — nothing enters the profile without one.
+        """
+        catalog = _catalog(request)
+        if not body.images and not body.shas:
+            raise HTTPException(status_code=400, detail="provide 'images' or 'shas'")
+        room = _taste_room(catalog)
+        staged: list[Path] = []
+        with tempfile.TemporaryDirectory(prefix="curator-taste-drop-") as tmp:
+            for index, encoded in enumerate(body.images):
+                path = Path(tmp) / f"drop-{index}"
+                path.write_bytes(_decode_b64(encoded))
+                staged.append(path)
+            drops: list[str | Path] = []
+            drops.extend(str(p) for p in staged)
+            drops.extend(body.shas)
+            try:
+                session = room.start(drops)
+                if body.save:
+                    for path in staged:
+                        data = path.read_bytes()
+                        ref = next(
+                            (
+                                r
+                                for r in room.session_images(session)
+                                if r.sha256 == sha256_hex(data)
+                            ),
+                            None,
+                        )
+                        if ref is not None and ref.ephemeral and not ref.catalog_saved:
+                            save_to_catalog(ref, data, catalog)
+                turn = room.react(session, body.note)
+                room.finish(session)
+            except ReactionRoomUnavailableError as exc:
+                # 503: the room is unavailable, not broken — and it never guesses.
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except CuratorError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        learned = WhatILearned.delta_after(session.id, ObservationStore(catalog))
+        return {
+            "session_id": session.id,
+            "observation": turn.observation.to_dict(),
+            "question": turn.question.to_dict() if turn.question else None,
+            "followups_asked": turn.followups_asked,
+            "learned": learned.to_dict(),
+        }
+
+    def _taste_claim_action(catalog: Catalog, body: TasteClaimRequest, kind: str) -> dict:
+        """Apply pin/edit/dispute to a claim, 404-ing when the profile lacks it."""
+        profile = _taste_profile_document(catalog)
+        claim = next(
+            (
+                c
+                for c in list(profile.patterns) + list(profile.tensions)
+                if c.id == body.claim_id
+            ),
+            None,
+        )
+        if claim is None:
+            raise HTTPException(
+                status_code=404, detail=f"no claim with id {body.claim_id!r}"
+            )
+        store = ProfileStore(catalog)
+        store.apply(profile)
+        if kind == "pin":
+            event = store.pin(body.claim_id)
+        elif kind == "edit":
+            if not body.text:
+                raise HTTPException(status_code=400, detail="'text' is required to edit")
+            event = store.edit(body.claim_id, body.text)
+        else:
+            event = store.dispute(body.claim_id)
+        return {"event": event.to_dict(), "was": claim.to_dict()}
+
+    @app.post("/api/taste/pin")
+    def taste_pin(body: TasteClaimRequest, request: Request) -> dict:
+        """Pin a claim (it stays, marked, on the append-only timeline)."""
+        return _taste_claim_action(_catalog(request), body, "pin")
+
+    @app.post("/api/taste/edit")
+    def taste_edit(body: TasteClaimRequest, request: Request) -> dict:
+        """Rewrite a claim in the user's own words."""
+        return _taste_claim_action(_catalog(request), body, "edit")
+
+    @app.post("/api/taste/dispute")
+    def taste_dispute(body: TasteClaimRequest, request: Request) -> dict:
+        """Dispute a claim: remove it and mark its evidence for re-interpretation."""
+        return _taste_claim_action(_catalog(request), body, "dispute")
+
+    @app.post("/api/taste/explain")
+    def taste_explain(body: AnalyzeRequest, request: Request) -> dict:
+        """Explain one rerank, citing the taste profile by the user's own words.
+
+        This is R036 in the live product: the M007 personal delta stays the
+        machine evidence, and the profile supplies the words. With an empty
+        profile the rationale is exactly the uncited baseline.
+        """
+        catalog = _catalog(request)
+        data, sha = _resolve_image(catalog, body.asset, body.bytes)
+        try:
+            analysis = LocalAnalysisProvider().analyze(
+                data, _parse_profile(body.profile), asset_id=sha
+            )
+        except AnalysisError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        explanation = explain_rank(
+            analysis, default_profile(), _taste_profile_document(catalog)
+        )
+        return explanation.to_dict()
 
     return app
 

@@ -8,6 +8,7 @@
     lastRender: null,
     reviewEntries: [],
     reviewFilter: "pending",
+    tasteProfile: null,
   };
 
   var $ = function (id) {
@@ -508,12 +509,201 @@
     renderReview();
   }
 
+  // -- taste dialogue --------------------------------------------------------
+
+  function readAsBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        // strip the "data:<mime>;base64," prefix the API does not want
+        var result = String(reader.result || "");
+        resolve(result.slice(result.indexOf(",") + 1));
+      };
+      reader.onerror = function () {
+        reject(new Error("could not read " + file.name));
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function submitReaction() {
+    var files = Array.prototype.slice.call($("taste-files").files || []);
+    var note = $("taste-note").value.trim();
+    if (!files.length) {
+      showToast("Pick at least one image to react to.", true);
+      return;
+    }
+    if (!note) {
+      showToast("Say something about it — your words are the point.", true);
+      return;
+    }
+    var button = $("taste-submit");
+    button.disabled = true;
+    $("taste-room-status").textContent = "Recording your reaction…";
+    try {
+      var images = await Promise.all(files.map(readAsBase64));
+      var turn = await fetchJSON("/api/taste/drop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images: images, note: note, save: $("taste-save").checked }),
+      });
+      renderTurn(turn);
+      $("taste-note").value = "";
+      await loadTasteProfile();
+    } catch (err) {
+      $("taste-room-status").textContent = err.message;
+      $("taste-room-status").classList.add("error");
+      showToast(err.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function renderTurn(turn) {
+    $("taste-room-status").classList.remove("error");
+    $("taste-room-status").textContent = "Recorded — kept in your own words.";
+    $("taste-turn").hidden = false;
+    // At most one probing question per turn; the room never lectures.
+    $("taste-question").textContent = turn.question ? turn.question.text : "";
+    // No silent learning: every reaction reports what it added.
+    $("taste-learned-body").textContent = (turn.learned && turn.learned.summary) || "";
+  }
+
+  function claimItem(claim) {
+    var item = el("li", "taste-claim");
+    item.setAttribute("data-claim-id", claim.id);
+    item.appendChild(el("p", "taste-claim-text", claim.text));
+
+    var meta = el("p", "taste-claim-meta");
+    meta.textContent =
+      claim.status + " · " + claim.provenance + "-provenance · " +
+      claim.evidence.length + " piece" + (claim.evidence.length === 1 ? "" : "s") +
+      " of evidence";
+    item.appendChild(meta);
+
+    // Every claim opens its evidence: the images and the words behind it.
+    var evidence = el("ul", "taste-evidence");
+    claim.evidence.forEach(function (ref) {
+      var line = el("li");
+      line.appendChild(el("code", "taste-evidence-sha", ref.image_sha.slice(0, 12)));
+      line.appendChild(el("q", "taste-evidence-quote", ref.verbatim));
+      line.appendChild(
+        el("span", "muted", " (confidence " + Number(ref.confidence).toFixed(2) + ")")
+      );
+      evidence.appendChild(line);
+    });
+    item.appendChild(evidence);
+
+    var actions = el("div", "taste-claim-actions");
+    [
+      { kind: "pin", label: "Pin" },
+      { kind: "edit", label: "Edit" },
+      { kind: "dispute", label: "Dispute" },
+    ].forEach(function (action) {
+      var btn = el("button", "btn", action.label);
+      btn.type = "button";
+      btn.setAttribute("data-action", action.kind);
+      btn.setAttribute("aria-label", action.label + " claim: " + claim.text);
+      btn.addEventListener("click", function () {
+        claimAction(action.kind, claim);
+      });
+      actions.appendChild(btn);
+    });
+    item.appendChild(actions);
+    return item;
+  }
+
+  async function claimAction(kind, claim) {
+    var body = { claim_id: claim.id };
+    if (kind === "edit") {
+      var text = window.prompt("Say it in your own words:", claim.text);
+      if (!text) return;
+      body.text = text;
+    }
+    try {
+      await fetchJSON("/api/taste/" + kind, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      showToast(
+        kind === "dispute"
+          ? "Disputed — the claim is gone and its evidence is marked for another look."
+          : "Recorded."
+      );
+      await loadTasteProfile();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  }
+
+  function renderTasteProfile(profile) {
+    var vocabulary = $("taste-vocabulary");
+    vocabulary.textContent = "";
+    var words = Object.keys(profile.vocabulary || {});
+    if (!words.length) {
+      vocabulary.appendChild(
+        el("li", "muted", "Nothing yet — react to some images above.")
+      );
+    }
+    words.forEach(function (word) {
+      var entry = profile.vocabulary[word];
+      vocabulary.appendChild(
+        el(
+          "li",
+          "taste-word",
+          word + " → " + entry.attribute + " (" + entry.usage_count + " uses)"
+        )
+      );
+    });
+
+    [
+      { id: "taste-patterns", claims: profile.patterns, empty: "No patterns yet." },
+      { id: "taste-tensions", claims: profile.tensions, empty: "No tensions surfaced." },
+    ].forEach(function (section) {
+      var list = $(section.id);
+      list.textContent = "";
+      var claims = section.claims || [];
+      if (!claims.length) {
+        list.appendChild(el("li", "muted", section.empty));
+        return;
+      }
+      claims.forEach(function (claim) {
+        list.appendChild(claimItem(claim));
+      });
+    });
+
+    var evolution = $("taste-evolution");
+    evolution.textContent = "";
+    (profile.evolution || []).forEach(function (entry) {
+      evolution.appendChild(
+        el("li", "taste-evolution-entry", (entry.at ? entry.at + ": " : "") + entry.summary)
+      );
+    });
+
+    var count = (profile.patterns || []).length + (profile.tensions || []).length;
+    $("taste-profile-status").textContent =
+      "Version " + profile.version + " · " + count + " claim" + (count === 1 ? "" : "s") +
+      " · " + words.length + " word" + (words.length === 1 ? "" : "s");
+  }
+
+  async function loadTasteProfile() {
+    try {
+      state.tasteProfile = await fetchJSON("/api/taste/profile");
+      renderTasteProfile(state.tasteProfile);
+    } catch (err) {
+      $("taste-profile-status").textContent = "Could not load the profile.";
+      showToast(err.message, true);
+    }
+  }
+
   // -- view switching --------------------------------------------------------
 
   function showView(view) {
     $("catalog-view").hidden = view !== "catalog";
     $("review-view").hidden = view !== "review";
-    var navs = { catalog: $("nav-catalog"), review: $("nav-review") };
+    $("taste-view").hidden = view !== "taste";
+    var navs = { catalog: $("nav-catalog"), review: $("nav-review"), taste: $("nav-taste") };
     Object.keys(navs).forEach(function (key) {
       if (key === view) {
         navs[key].setAttribute("aria-current", "page");
@@ -522,6 +712,7 @@
       }
     });
     if (view === "review") renderReview();
+    if (view === "taste") loadTasteProfile();
   }
 
   // -- boot ------------------------------------------------------------------
@@ -578,6 +769,11 @@
     e.preventDefault();
     showView("review");
   });
+  $("nav-taste").addEventListener("click", function (e) {
+    e.preventDefault();
+    showView("taste");
+  });
+  $("taste-submit").addEventListener("click", submitReaction);
   ["pending", "approved", "rejected", "all"].forEach(function (key) {
     $("filter-" + key).addEventListener("click", function () {
       setFilter(key);

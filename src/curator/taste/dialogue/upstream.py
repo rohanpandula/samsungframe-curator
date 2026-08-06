@@ -283,14 +283,19 @@ def explain_rank(
     The M007 contributions are always the machine evidence and always drive
     ``delta`` — M008 adds words, not weights. With an empty profile the rationale
     is byte-identical to the uncited baseline string (R036 graceful degradation).
+
+    Citing is independent of whether the M007 lens profile is enabled: an inert
+    lens means nothing was reranked, but the taste profile still has something to
+    say about the work, and R036 is about explanations quoting the profile.
     """
     ranker = TasteRanker()
-    if lens_profile is None or not ranker.is_enabled(lens_profile):
-        return RankExplanation(
-            rationale=_BASELINE_RATIONALE, citations=[], evidence=[], delta=0.0
-        )
-    delta, contributions = ranker.personal_delta(analysis, lens_profile)
-    rationale = _delta_rationale(delta, contributions)
+    delta = 0.0
+    contributions: list[dict[str, Any]] = []
+    if lens_profile is not None and ranker.is_enabled(lens_profile):
+        delta, contributions = ranker.personal_delta(analysis, lens_profile)
+        rationale = _delta_rationale(delta, contributions)
+    else:
+        rationale = _BASELINE_RATIONALE
     citations = citations_for(profile, limit=limit)
     if citations:
         rationale = f"{rationale}; " + "; ".join(c.render() for c in citations)
