@@ -1,23 +1,37 @@
-"""Active-learning pairwise engine + evidence (M007/S02).
+"""Active-learning pairwise engine + evidence (M007/S02; generalized M009/S05).
 
 Deterministic, bootstrap-free machinery on top of S01 profiles: an uncertainty
 score that measures how close/near-tied a candidate pair is under a profile, a
 most-informative pair chooser that is deterministic given its inputs, a frozen
 weight update (:func:`apply_preference`) that never mutates its input, and a
 gated promotion flow (:func:`evaluate` + :func:`promote_if_valid`) that only
-admits a trained profile once held-out evidence clears a threshold.
+admits a trained scorer once held-out evidence clears a threshold.
+
+:func:`evaluate` is generalized over any :data:`Scorer` (M009/S05, R043) — a
+:class:`TasteProfile`-backed scorer (via
+:meth:`~curator.taste.rank.TasteRanker.personal_delta`) and an embedding-head
+scorer (:meth:`~curator.taste.embedding.head.EmbeddingHead.score`) are both
+ordinary callers now, adapted by a one-line lambda at the call site, never a
+special case inside this module. ``promote_if_valid`` is unchanged: it only
+ever inspects a :class:`PairwiseEvidence`, so it was already scorer-agnostic.
 """
 
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence, Set
+from collections.abc import Callable, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
 
 from curator.analysis.schema import AnalysisResult
 from curator.taste.profiles import SIGNAL_NAMES, TasteProfile
 from curator.taste.rank import TasteRanker
+
+#: A trained scorer: given one candidate's analysis, return its *delta* only
+#: (added to the candidate's own ``baseline`` by :func:`_score`) — never
+#: baseline+delta itself. ``TasteRanker.personal_delta``'s first element and
+#: ``EmbeddingHead.score`` both already satisfy this shape.
+Scorer = Callable[[AnalysisResult], float]
 
 #: Small per-preference weight adjustment (":func:`apply_preference`).
 LEARNING_STEP = 0.1
@@ -163,14 +177,30 @@ class PairwiseEvidence:
         )
 
 
-def _score(
-    ranker: TasteRanker,
-    analysis: AnalysisResult,
-    profile: TasteProfile | None,
-    baseline: float,
-) -> float:
-    delta, _ = ranker.personal_delta(analysis, profile) if profile is not None else (0.0, [])
-    return baseline + delta
+def _score(scorer: Scorer, analysis: AnalysisResult, baseline: float) -> float:
+    """Return ``baseline + scorer(analysis)`` — a scorer contributes a delta only."""
+    return baseline + scorer(analysis)
+
+
+def _rank_by_scorer(
+    candidates: list[dict[str, Any]],
+    analysis_map: dict[Any, AnalysisResult],
+    scorer: Scorer,
+) -> list[str]:
+    """Return candidate ids ranked by ``baseline + scorer(analysis)``, descending.
+
+    The exact same descending-score / stable-original-index tie-break
+    :meth:`~curator.taste.rank.TasteRanker.rank` already uses, driven by an
+    arbitrary :data:`Scorer` instead of requiring a :class:`TasteProfile` —
+    :func:`evaluate` no longer needs to import or construct a
+    :class:`~curator.taste.rank.TasteRanker` at all.
+    """
+    keyed = [
+        (-(float(cand["baseline"]) + scorer(analysis_map[cand["id"]])), index, cand["id"])
+        for index, cand in enumerate(candidates)
+    ]
+    keyed.sort(key=lambda row: (row[0], row[1]))
+    return [cid for _, _, cid in keyed]
 
 
 def _spearman(order_a: Sequence[str], order_b: Sequence[str]) -> float:
@@ -193,23 +223,27 @@ def _spearman(order_a: Sequence[str], order_b: Sequence[str]) -> float:
 
 
 def evaluate(
-    profile_trained: TasteProfile,
-    profile_baseline: TasteProfile,
+    scorer_trained: Scorer,
+    scorer_baseline: Scorer,
     candidates: list[dict[str, Any]],
     analysis_map: dict[Any, AnalysisResult],
     held_out_pairs: Sequence[tuple[str, str, str]],
+    *,
+    sample_efficiency_pairs: int,
 ) -> PairwiseEvidence:
-    """Measure a trained profile against ground-truth preferences.
+    """Measure a trained scorer against ground-truth preferences.
 
     ``held_out_pairs`` is a list of ``(id_a, id_b, preferred_id)`` triples. The
     held-out pairwise accuracy is the fraction of triples where the trained
-    profile's ``baseline + delta`` ranking matches the stated preference.
+    scorer's ``baseline + delta`` ranking matches the stated preference.
     ``ranking_lift_vs_baseline`` is the Spearman-correlation gap between the
     trained and baseline ranking against a preference-derived ground-truth
-    ordering. ``sample_efficiency_pairs`` records how many preference updates
-    (one per profile version past 1) produced the trained profile.
+    ordering. ``sample_efficiency_pairs`` is supplied by the caller (not
+    derived here) — a :class:`TasteProfile` caller passes ``version - 1`` (one
+    preference update per version past 1, the M007 convention); an embedding
+    head has no ``.version`` with that semantics, so every caller now states
+    this count explicitly rather than this function assuming a profile shape.
     """
-    ranker = TasteRanker()
     baseline_map = {cand["id"]: float(cand["baseline"]) for cand in candidates}
     totals = len(held_out_pairs)
     correct = 0
@@ -218,8 +252,8 @@ def evaluate(
         preferred_count[aid] = preferred_count.get(aid, 0)
         preferred_count[bid] = preferred_count.get(bid, 0)
         preferred_count[pref] = preferred_count.get(pref, 0) + 1
-        score_a = _score(ranker, analysis_map[aid], profile_trained, baseline_map[aid])
-        score_b = _score(ranker, analysis_map[bid], profile_trained, baseline_map[bid])
+        score_a = _score(scorer_trained, analysis_map[aid], baseline_map[aid])
+        score_b = _score(scorer_trained, analysis_map[bid], baseline_map[bid])
         trained_pref = aid if score_a >= score_b else bid
         if trained_pref == pref:
             correct += 1
@@ -229,20 +263,14 @@ def evaluate(
         preferred_count,
         key=lambda cid: (-preferred_count[cid], cid),
     )
-    trained_order = [
-        c["id"]
-        for c in ranker.rank(candidates, profile_trained, analysis_map=analysis_map)
-    ]
-    baseline_order = [
-        c["id"]
-        for c in ranker.rank(candidates, profile_baseline, analysis_map=analysis_map)
-    ]
+    trained_order = _rank_by_scorer(candidates, analysis_map, scorer_trained)
+    baseline_order = _rank_by_scorer(candidates, analysis_map, scorer_baseline)
     lift = _spearman(trained_order, ground_truth) - _spearman(baseline_order, ground_truth)
     return PairwiseEvidence(
         held_out_pairs=totals,
         held_out_accuracy=accuracy,
         ranking_lift_vs_baseline=lift,
-        sample_efficiency_pairs=profile_trained.version - 1,
+        sample_efficiency_pairs=sample_efficiency_pairs,
     )
 
 
