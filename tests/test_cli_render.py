@@ -242,6 +242,154 @@ def test_validate_wrong_dimensions(tmp_path, capsys):
     assert "width" in dims_check["reason"]
 
 
+# -- M010/S01: curator validate --manifest (the production region reader) -----
+
+
+def _seed_diptych(tmp_path, count: int = 2, regions: str = "packed"):
+    """Store *count* sources and write a manifest JSON; return (path, manifest, sources)."""
+    from curator.artdirection.manifest import ArtDirectionManifest, LayoutTreatment
+    from curator.artdirection.manifest import SourceRegion as Region
+    from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
+    from curator.content_store import ContentStore
+
+    store = ContentStore()
+    sources = {}
+    for index in range(count):
+        data = _save_png(
+            tmp_path / f"src{index}.png", 1600, 1200, color=(10 + index * 30, 60, 90)
+        )
+        sources[store.put(data)] = data
+    shas = list(sources)
+    target = (1920, 1080)
+    if regions == "packed":
+        cells = equal_cells(shas, Cell(0, 0, *target), gap=gutter_for_target(target))
+    elif regions == "unset":
+        cells = [Region(source_sha256=sha) for sha in shas]
+    else:  # "short" — one region for many sources, the invariant Task 1 added
+        cells = [Region(source_sha256=shas[0])]
+    manifest = ArtDirectionManifest(
+        sources=shas,
+        regions=cells,
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=shas,
+    )
+    path = tmp_path / "diptych.json"
+    path.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+    return path, manifest, sources
+
+
+def test_validate_manifest_round_trip_checks_every_cell(tmp_path, capsys, data_root):
+    """Render a 2-source manifest, then validate that artifact cell by cell."""
+    from curator.render.renderer import DeterministicRenderer
+
+    manifest_path, manifest, sources = _seed_diptych(tmp_path)
+
+    assert cli.main(["render", "--json", str(manifest_path), "--target", "1080p"]) == 0
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["treatment"] == "diptych"
+
+    artifact = tmp_path / "out.png"
+    payload = DeterministicRenderer().render_bytes(manifest, sources, (1920, 1080))
+    artifact.write_bytes(payload)
+    assert sha256_hex(payload) == rendered["sha256"]
+
+    rc = cli.main(
+        [
+            "validate",
+            "--json",
+            str(artifact),
+            "--expected-sha",
+            rendered["sha256"],
+            "--target",
+            "1080p",
+            "--manifest",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    names = {c["name"] for c in report["checks"]}
+    assert "source_region[0]" in names
+    assert "source_region[1]" in names
+    assert "no_unintended_crop[0]" in names
+    assert "source_regions_disjoint" in names
+    assert report["publishable"] is True
+
+
+def test_validate_manifest_recomputes_legacy_all_zero_regions(
+    tmp_path, capsys, data_root
+):
+    """An all-zero (unset) manifest still yields real per-cell checks."""
+    from curator.render.renderer import DeterministicRenderer
+
+    manifest_path, manifest, sources = _seed_diptych(tmp_path, regions="unset")
+    payload = DeterministicRenderer().render_bytes(manifest, sources, (1920, 1080))
+    artifact = tmp_path / "legacy.png"
+    artifact.write_bytes(payload)
+
+    rc = cli.main(
+        [
+            "validate",
+            "--json",
+            str(artifact),
+            "--expected-sha",
+            sha256_hex(payload),
+            "--target",
+            "1080p",
+            "--manifest",
+            str(manifest_path),
+        ]
+    )
+    assert rc == 0
+    report = json.loads(capsys.readouterr().out)
+    assert {"source_region[0]", "source_region[1]"} <= {
+        c["name"] for c in report["checks"]
+    }
+
+
+def test_validate_malformed_manifest_is_fatal(tmp_path, capsys, data_root):
+    """Unreadable manifest JSON is a clean exit 2, never a traceback."""
+    artifact = tmp_path / "out.png"
+    data = _save_png(artifact, 1920, 1080)
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+
+    rc = cli.main(
+        [
+            "validate",
+            str(artifact),
+            "--expected-sha",
+            sha256_hex(data),
+            "--target",
+            "1080p",
+            "--manifest",
+            str(bad),
+        ]
+    )
+    assert rc == 2
+    assert "failed to load manifest" in capsys.readouterr().err
+
+
+def test_render_rejects_region_count_mismatch(tmp_path, capsys, data_root):
+    """A hand-edited manifest with 2 sources and 1 region exits 2 (M010/S01)."""
+    manifest_path, _, _ = _seed_diptych(tmp_path, regions="short")
+    rc = cli.main(["render", "--json", str(manifest_path), "--target", "1080p"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "2 source(s) but 1 region(s)" in err
+    assert "one region per source" in err
+
+
+def test_render_rejects_over_cap_source_count(tmp_path, capsys, data_root):
+    """A ten-source manifest is rejected by the cap, never truncated."""
+    manifest_path, _, _ = _seed_diptych(tmp_path, count=10, regions="unset")
+    rc = cli.main(["render", "--json", str(manifest_path), "--target", "1080p"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "9-source layout cap" in err
+    assert "never truncated" in err
+
+
 def test_validate_human_summary_lists_failing_checks(tmp_path, capsys):
     """Human validate output shows the publishable flag and failing-check reason."""
     artifact = tmp_path / "out.png"

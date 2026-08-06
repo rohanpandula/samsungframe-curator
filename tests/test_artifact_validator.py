@@ -13,6 +13,7 @@ from curator.artdirection.manifest import (
     LayoutTreatment,
     SourceRegion,
 )
+from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
 from curator.hashing import sha256_hex
 from curator.render.renderer import DeterministicRenderer
 from curator.render.validate import ArtifactValidator, ValidationCheck, ValidationReport
@@ -240,3 +241,125 @@ def test_validator_is_deterministic() -> None:
     b = validator.validate(payload, sha, TARGET, source_region=in_bounds_region())
     assert a == b
     assert a.to_dict() == b.to_dict()
+
+
+# -- M010/S01: N cells --------------------------------------------------------
+
+
+UHD = (3840, 2160)
+
+
+def packed(target: tuple[int, int], count: int = 3) -> list[SourceRegion]:
+    """Real packed cells for *target*, straight from the production packer."""
+    order = [f"sha{i}" for i in range(count)]
+    return equal_cells(order, Cell(0, 0, *target), gap=gutter_for_target(target))
+
+
+def test_accept_packed_regions_at_1080p() -> None:
+    payload, sha = render()
+    report = validator.validate(payload, sha, TARGET, source_regions=packed(TARGET))
+    assert report.publishable is True
+    for index in range(3):
+        assert by_name(report, f"source_region[{index}]").passed is True
+        assert by_name(report, f"no_unintended_crop[{index}]").passed is True
+    assert by_name(report, "source_regions_disjoint").passed is True
+
+
+def test_accept_packed_regions_at_4k() -> None:
+    """The same packer output tiles a 4K canvas cleanly (rounding-drift backstop)."""
+    img = Image.new("RGB", UHD, (40, 80, 160))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    payload = buf.getvalue()
+    report = validator.validate(
+        payload, sha256_hex(payload), UHD, source_regions=packed(UHD, count=5)
+    )
+    assert report.publishable is True
+    assert by_name(report, "source_regions_disjoint").passed is True
+
+
+def test_reject_out_of_bounds_cell_names_its_index() -> None:
+    payload, sha = render()
+    regions = [
+        SourceRegion(source_sha256="a", x=0, y=0, w=600, h=1080),
+        SourceRegion(source_sha256="b", x=660, y=0, w=600, h=1080),
+        SourceRegion(source_sha256="c", x=2500, y=0, w=600, h=1080),
+    ]
+    report = validator.validate(payload, sha, TARGET, source_regions=regions)
+    assert by_name(report, "source_region[0]").passed is True
+    assert by_name(report, "source_region[1]").passed is True
+    failing = by_name(report, "source_region[2]")
+    assert failing.passed is False
+    assert "out of bounds" in failing.reason
+    assert report.publishable is False
+
+
+def test_reject_sub_pixel_region_as_not_normalized() -> None:
+    """The coordinate-space discriminator: w=0.5 is a sub-pixel cell, not half a canvas."""
+    payload, sha = render()
+    region = SourceRegion(source_sha256="s", x=0, y=0, w=0.5, h=0.4)
+    report = validator.validate(payload, sha, TARGET, source_regions=[region])
+    check = by_name(report, "source_region[0]")
+    assert check.passed is False
+    assert "pixel" in check.reason
+    assert "normalized" in check.reason
+    assert report.publishable is False
+
+
+def test_sub_pixel_region_also_rejected_on_the_singular_parameter() -> None:
+    payload, sha = render()
+    region = SourceRegion(source_sha256="s", x=0, y=0, w=0.5, h=0.4)
+    report = validator.validate(payload, sha, TARGET, source_region=region)
+    assert by_name(report, "source_region").passed is False
+
+
+def test_unset_region_passes_cleanly() -> None:
+    """An all-zero cell declares no geometry, so it is skipped, not failed."""
+    payload, sha = render()
+    report = validator.validate(
+        payload, sha, TARGET, source_regions=[SourceRegion(source_sha256="s")]
+    )
+    check = by_name(report, "source_region[0]")
+    assert check.passed is True
+    assert "unset region" in check.reason
+    assert not any(c.name == "no_unintended_crop[0]" for c in report.checks)
+    assert report.publishable is True
+
+
+def test_reject_overlapping_cells() -> None:
+    payload, sha = render()
+    regions = [
+        SourceRegion(source_sha256="a", x=0, y=0, w=1000, h=1080),
+        SourceRegion(source_sha256="b", x=900, y=0, w=1000, h=1080),
+    ]
+    report = validator.validate(payload, sha, TARGET, source_regions=regions)
+    check = by_name(report, "source_regions_disjoint")
+    assert check.passed is False
+    assert "cell 0" in check.reason and "cell 1" in check.reason
+    assert report.publishable is False
+    # The overlapping cells are individually in-bounds; only disjointness trips.
+    assert by_name(report, "source_region[0]").passed is True
+    assert by_name(report, "source_region[1]").passed is True
+
+
+def test_region_list_path_is_deterministic() -> None:
+    payload, sha = render()
+    a = validator.validate(payload, sha, TARGET, source_regions=packed(TARGET))
+    b = validator.validate(payload, sha, TARGET, source_regions=packed(TARGET))
+    assert a == b
+    assert a.to_dict() == b.to_dict()
+
+
+def test_singular_source_region_still_works_alongside_the_list() -> None:
+    """Backward compatibility: the M003 parameter is untouched by the N-cell path."""
+    payload, sha = render()
+    report = validator.validate(
+        payload,
+        sha,
+        TARGET,
+        source_region=in_bounds_region(),
+        source_regions=packed(TARGET, count=2),
+    )
+    assert by_name(report, "source_region").passed is True
+    assert by_name(report, "source_region[0]").passed is True
+    assert report.publishable is True

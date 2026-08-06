@@ -84,6 +84,7 @@ from curator.analysis.profiles import AnalysisProfile
 from curator.analysis.schema import AnalysisResult
 from curator.approve import ApprovalError, ApprovalService
 from curator.artdirection.manifest import ArtDirectionManifest, SourceRegion
+from curator.artdirection.packing import resolve_regions
 from curator.artdirection.policy import ArtDirectionRequest, propose_treatments
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
@@ -209,6 +210,8 @@ class ValidateRequest(BaseModel):
     ``artifact_sha`` resolves rendered bytes from the ContentStore, or
     ``artifact_bytes`` carries them base64-encoded directly (tests).
     ``expected_sha`` is the provenance hash checked against the artifact.
+    ``manifest`` (M010/S01) additionally checks the artifact's cell geometry:
+    its regions are resolved for the target and validated per cell.
     """
 
     artifact_sha: str | None = None
@@ -219,6 +222,7 @@ class ValidateRequest(BaseModel):
     target_height: int | None = None
     color_mode: str = "RGB"
     color_profile: str = "sRGB"
+    manifest: dict[str, Any] | None = None
 
 
 class TasteDropRequest(BaseModel):
@@ -628,7 +632,12 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
 
     @app.post("/api/validate")
     def validate(body: ValidateRequest, request: Request) -> dict:
-        """Gate an artifact for publishability via ArtifactValidator."""
+        """Gate an artifact for publishability via ArtifactValidator.
+
+        A supplied ``manifest`` is resolved for the target and its cells checked
+        one by one (M010/S01); an invalid manifest or an unpackable cell list is
+        a 400 carrying the error text.
+        """
         catalog = _catalog(request)
         if body.artifact_bytes is not None:
             artifact = _decode_b64(body.artifact_bytes)
@@ -639,12 +648,22 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
                 status_code=400, detail="provide 'artifact_sha' or 'artifact_bytes'"
             )
         target = _parse_target(body.target, body.target_width, body.target_height)
+        regions: list[SourceRegion] | None = None
+        if body.manifest is not None:
+            try:
+                manifest = ArtDirectionManifest.from_dict(body.manifest)
+                if isinstance(body.target, str):
+                    manifest = manifest.resolved_for(body.target)
+                regions = resolve_regions(manifest, target)
+            except CuratorError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         report = ArtifactValidator().validate(
             artifact,
             body.expected_sha,
             target,
             color_mode=body.color_mode,
             color_profile=body.color_profile,
+            source_regions=regions,
         )
         return report.to_dict()
 

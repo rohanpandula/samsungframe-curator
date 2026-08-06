@@ -122,6 +122,7 @@ from curator.artdirection.manifest import (
     LayoutTreatment,
     SourceRegion,
 )
+from curator.artdirection.packing import resolve_regions
 from curator.artdirection.policy import (
     ArtDirectionRequest,
     TreatmentProposal,
@@ -374,6 +375,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         required=True,
         help="expected target dims (named 1080p/4k or WxH)",
+    )
+    validate.add_argument(
+        "--manifest",
+        help="check the artifact's cell geometry against an Art Direction Manifest",
     )
     validate.add_argument(
         "--json",
@@ -1272,11 +1277,16 @@ def _validate(args: argparse.Namespace) -> int:
     """Gate a rendered artifact against expected provenance (dimensions + SHA-256).
 
     Reads *args.file*'s bytes and runs :class:`ArtifactValidator` against the
-    expected SHA-256 and parsed ``--target`` dims. Prints a human-readable summary
+    expected SHA-256 and parsed ``--target`` dims. With ``--manifest`` the
+    artifact is additionally checked cell by cell (M010/S01): the manifest is
+    resolved for ``--target``, its cells resolved via
+    :func:`~curator.artdirection.packing.resolve_regions`, and each one checked
+    for bounds, sub-pixel extent, unintended cropping and disjointness — the
+    production read side of region geometry. Prints a human-readable summary
     (publishable flag plus every failing check's reason) or the
     :class:`ValidationReport` as JSON. Returns :data:`EXIT_OK` (0) when
     publishable, :data:`EXIT_PARTIAL` (1) otherwise, and :data:`EXIT_FATAL` (2)
-    on a read or target parse error.
+    on a read, manifest or target parse error.
     """
     path = Path(args.file).resolve()
     try:
@@ -1289,7 +1299,23 @@ def _validate(args: argparse.Namespace) -> int:
     except CuratorError as exc:
         print(f"curator: error: {exc}", file=sys.stderr)
         return EXIT_FATAL
-    report = ArtifactValidator().validate(data, args.expected_sha, (width, height))
+    regions: list[SourceRegion] | None = None
+    if args.manifest:
+        manifest_path = Path(args.manifest).resolve()
+        try:
+            manifest = ArtDirectionManifest.from_dict(
+                json.loads(manifest_path.read_text(encoding="utf-8"))
+            ).resolved_for(args.target)
+            regions = resolve_regions(manifest, (width, height))
+        except (json.JSONDecodeError, CuratorError, OSError) as exc:
+            print(
+                f"curator: error: failed to load manifest {manifest_path}: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_FATAL
+    report = ArtifactValidator().validate(
+        data, args.expected_sha, (width, height), source_regions=regions
+    )
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
     else:

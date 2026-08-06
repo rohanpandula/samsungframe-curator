@@ -382,6 +382,54 @@ def test_webui_validate_correct_artifact(client, catalog):
     assert report["valid"] is True
 
 
+def test_webui_validate_with_manifest_checks_every_cell(client):
+    """POST /api/validate with a manifest gates cell geometry too (M010/S01)."""
+    from curator.artdirection.manifest import LayoutTreatment
+    from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
+
+    renderer = DeterministicRenderer()
+    target = (1920, 1080)
+    payload = {sha256_hex(src): src for src in (_png(1600, 1200), _png(1400, 1100))}
+    shas = list(payload)
+    manifest = ArtDirectionManifest(
+        sources=shas,
+        regions=equal_cells(shas, Cell(0, 0, *target), gap=gutter_for_target(target)),
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=shas,
+    )
+    raw = renderer.render_bytes(manifest, payload, target)
+    resp = client.post(
+        "/api/validate",
+        json={
+            "artifact_bytes": _b64(raw),
+            "expected_sha": sha256_hex(raw),
+            "target": "1080p",
+            "manifest": manifest.to_dict(),
+        },
+    )
+    assert resp.status_code == 200
+    report = resp.json()
+    names = {c["name"] for c in report["checks"]}
+    assert {"source_region[0]", "source_region[1]", "source_regions_disjoint"} <= names
+    assert report["publishable"] is True
+
+
+def test_webui_validate_rejects_invalid_manifest(client):
+    """An over-cap manifest is a 400 carrying the cap message, not a 500."""
+    raw = _png(1920, 1080)
+    resp = client.post(
+        "/api/validate",
+        json={
+            "artifact_bytes": _b64(raw),
+            "expected_sha": sha256_hex(raw),
+            "target": "1080p",
+            "manifest": {"manifest_version": "999", "sources": ["a"]},
+        },
+    )
+    assert resp.status_code == 400
+    assert "unsupported manifest version" in str(resp.json()["detail"])
+
+
 def test_webui_validate_tampered_bytes(client):
     """Tampered artifact bytes fail validation with a hash check failure."""
     renderer = DeterministicRenderer()
