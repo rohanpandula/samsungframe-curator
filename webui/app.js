@@ -739,6 +739,15 @@
       return;
     }
     var pair = currentTastePair;
+    // IN-03: disable both buttons for the duration of the request, mirroring
+    // submitReaction's existing pattern — a rapid double-click otherwise fires
+    // two POST /api/taste/vote requests against the same pair before the first
+    // response updates it (harmless — the server-side TOCTOU check 409s the
+    // second one — but an avoidable, user-visible "pair changed" flash).
+    var buttonA = $("taste-prefer-a");
+    var buttonB = $("taste-prefer-b");
+    buttonA.disabled = true;
+    buttonB.disabled = true;
     try {
       var result = await fetchJSON("/api/taste/vote", {
         method: "POST",
@@ -761,6 +770,9 @@
         return;
       }
       showToast(err.message, true);
+    } finally {
+      buttonA.disabled = false;
+      buttonB.disabled = false;
     }
   }
 
