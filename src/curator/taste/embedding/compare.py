@@ -147,14 +147,20 @@ def _predicted_winner(
     bid: str,
     analysis_map: dict[Any, AnalysisResult],
     baseline_map: dict[str, float],
-) -> str:
-    """Return *scorer*'s predicted winner of ``(aid, bid)`` — the ``_score``-equivalent
-    ``baseline + scorer(analysis)`` comparison, ``>=`` breaking ties toward *aid*
-    (the same tie-break :func:`~curator.taste.pairwise.evaluate` itself uses).
+) -> str | None:
+    """Return *scorer*'s predicted winner of ``(aid, bid)``, or ``None`` on an exact tie.
+
+    The ``_score``-equivalent ``baseline + scorer(analysis)`` comparison. CR-01:
+    ties never credit either head — an exact tie is an abstention (``None``),
+    never a win for *aid*, matching :func:`~curator.taste.pairwise.evaluate`'s own
+    tie-is-abstention rule. A zero-capacity/zero-information scorer that ties on
+    every pair must never be treated as having an opinion.
     """
     score_a = baseline_map[aid] + scorer(analysis_map[aid])
     score_b = baseline_map[bid] + scorer(analysis_map[bid])
-    return aid if score_a >= score_b else bid
+    if score_a == score_b:
+        return None
+    return aid if score_a > score_b else bid
 
 
 def compare_heads(
@@ -234,7 +240,11 @@ def compare_heads(
     for aid, bid, preferred in held_out_pairs:
         lens_pred = _predicted_winner(lens_scorer, aid, bid, analysis_map, baseline_map)
         embedding_pred = _predicted_winner(embedding_scorer, aid, bid, analysis_map, baseline_map)
-        if lens_pred == embedding_pred:
+        if lens_pred is None or embedding_pred is None or lens_pred == embedding_pred:
+            # CR-01: either head abstaining (an exact tie) is not disagreement —
+            # only a genuine, opposing preference from both heads counts as
+            # discordant. An abstention must never be silently treated as a
+            # "win" for the discordant-pairs computation either.
             continue
         discordant_pairs += 1
         if embedding_pred == preferred:

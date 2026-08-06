@@ -454,12 +454,23 @@ def test_acceptance_taste_embedding_comparison_insufficient_then_decisive() -> N
     candidates, analysis_map, training_votes, held_out_pairs, vector_by_id = (
         _well_powered_comparison_fixture()
     )
+
+    def lower_index_lens_scorer(analysis: AnalysisResult) -> float:
+        """A lens with a genuine (never-tied), deterministically WRONG opinion —
+        post-CR-01 a tied/zero-information lens correctly abstains rather than
+        "winning" discordant pairs via the old aid tie-break, so this fixture
+        needs a real (if wrong) opinion instead of a constant. Prefers the
+        lower-indexed candidate; ``_well_powered_comparison_fixture`` always
+        makes the higher-indexed one of each held-out pair the true preference.
+        """
+        return -float(analysis.asset_id[1:])
+
     decisive = compare_heads(
         training_votes=training_votes,
         held_out_pairs=held_out_pairs,
         candidates=candidates,
         analysis_map=analysis_map,
-        lens_scorer=_zero_scorer,
+        lens_scorer=lower_index_lens_scorer,
         embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
         baseline_scorer=_zero_scorer,
     )

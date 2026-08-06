@@ -254,7 +254,14 @@ def evaluate(
         preferred_count[pref] = preferred_count.get(pref, 0) + 1
         score_a = _score(scorer_trained, analysis_map[aid], baseline_map[aid])
         score_b = _score(scorer_trained, analysis_map[bid], baseline_map[bid])
-        trained_pref = aid if score_a >= score_b else bid
+        if score_a == score_b:
+            # CR-01: ties never credit either head. An exact tie is an
+            # abstention, not a win — counted in `totals` (the denominator)
+            # but never in `correct`, so a zero-information scorer that ties
+            # on every pair scores 0.0, never a spurious 1.0 purely as an
+            # artifact of which id happened to land in the `aid` slot.
+            continue
+        trained_pref = aid if score_a > score_b else bid
         if trained_pref == pref:
             correct += 1
     accuracy = correct / totals if totals else 0.0

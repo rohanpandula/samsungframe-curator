@@ -118,6 +118,62 @@ def test_compare_heads_reports_insufficient_evidence_below_min_discordant_pairs(
 
 
 # ---------------------------------------------------------------------------
+# CR-01: a zero-capacity embedding head must never be rewarded by ties
+# ---------------------------------------------------------------------------
+
+
+def test_compare_heads_zero_capacity_embedding_head_is_never_rewarded_by_ties() -> None:
+    """Reproduces CR-01 against the real ``compare_heads`` end-to-end: a
+    zero-capacity embedding head (``training_votes=[]`` — the real state of a
+    fresh install before any ``--backfill``/embedding has run) ties against an
+    identical baseline on every held-out pair. It must score 0.0 accuracy, never
+    be promoted, and never register as "better" than a lens head that has a
+    genuine opinion — using the exact production ``held_out_pairs`` shape
+    ``(winner, loser, winner)`` that ``api.py``/``cli.py`` actually construct
+    (the convention every other fixture in this file deliberately avoids, which
+    is exactly why the original bug was invisible to this test suite).
+    """
+    n = 6
+    candidates = [{"id": f"z{i}", "baseline": 0.0} for i in range(n)]
+    analysis_map = {f"z{i}": _result(f"z{i}", colorfulness=i / (n - 1)) for i in range(n)}
+
+    def lens_scorer(analysis: AnalysisResult) -> float:
+        return analysis.color_story.colorfulness  # a genuine, deterministic opinion
+
+    def zero_capacity_embedding_factory(votes_subset: Sequence[VoteVectors]) -> Scorer:
+        head = fit_embedding_head(list(votes_subset), "v1")  # votes_subset is always []
+
+        def scorer(analysis: AnalysisResult) -> float:
+            return head.score(np.zeros(EMBEDDING_DIM, dtype=np.float32))
+
+        return scorer
+
+    # Production convention: the preferred (winning) id is always first — the
+    # exact shape api.py/cli.py build from real VoteRecords.
+    held_out_pairs = [(f"z{2 * k}", f"z{2 * k + 1}", f"z{2 * k}") for k in range(n // 2)]
+
+    comparison = compare_heads(
+        training_votes=[],
+        held_out_pairs=held_out_pairs,
+        candidates=candidates,
+        analysis_map=analysis_map,
+        lens_scorer=lens_scorer,
+        embedding_scorer_factory=zero_capacity_embedding_factory,
+        baseline_scorer=_zero_scorer,
+    )
+
+    assert comparison.embedding_evidence.sample_efficiency_pairs == 0
+    # Must never be the spurious 1.0 the original bug reported for this exact
+    # scenario — a head that has seen zero votes has no opinion, ever.
+    assert comparison.embedding_evidence.held_out_accuracy == 0.0
+    assert comparison.embedding_promoted is False
+    # The zero-capacity head never disagrees with the lens head — it never has
+    # an opinion to disagree with.
+    assert comparison.discordant_pairs == 0
+    assert comparison.verdict == "insufficient_evidence"
+
+
+# ---------------------------------------------------------------------------
 # a decisive verdict is reachable — not just always "insufficient_evidence"
 # ---------------------------------------------------------------------------
 
@@ -204,6 +260,21 @@ def _well_powered_fixture() -> tuple[
     return candidates, analysis_map, training_votes, held_out_pairs, vector_by_id
 
 
+def _lower_index_lens_scorer(analysis: AnalysisResult) -> float:
+    """A lens with a genuine (never-tied), deterministically WRONG opinion.
+
+    Reads the numeric suffix straight off ``asset_id`` (e.g. ``"d17"`` -> 17)
+    and prefers lower indices — the opposite of every fixture built by
+    :func:`_well_powered_fixture`/``_well_powered_comparison_fixture``, where
+    the higher-indexed candidate of each held-out pair is always the true
+    preferred one. Post-CR-01, a *tied* (zero-information) lens scorer
+    correctly abstains rather than "winning" discordant pairs via the old
+    aid tie-break, so a decisive-verdict fixture needs a lens with a real
+    (if wrong) opinion — this is that opinion, never a coin-flip.
+    """
+    return -float(analysis.asset_id[1:])
+
+
 def test_compare_heads_reaches_decisive_verdict_when_embedding_correlates() -> None:
     candidates, analysis_map, training_votes, held_out_pairs, vector_by_id = (
         _well_powered_fixture()
@@ -214,7 +285,7 @@ def test_compare_heads_reaches_decisive_verdict_when_embedding_correlates() -> N
         held_out_pairs=held_out_pairs,
         candidates=candidates,
         analysis_map=analysis_map,
-        lens_scorer=_zero_scorer,  # constant -> always predicts the first-named id
+        lens_scorer=_lower_index_lens_scorer,
         embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
         baseline_scorer=_zero_scorer,
     )

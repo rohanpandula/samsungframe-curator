@@ -239,6 +239,49 @@ def test_evaluate_trained_profile_beats_baseline():
 
 
 # ---------------------------------------------------------------------------
+# CR-01: a tie is an abstention, never a win — position-independent
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_tie_is_abstention_not_a_win_regardless_of_pair_position():
+    """A zero-information scorer must score 0.0 accuracy no matter which id the
+    caller happens to place in the ``aid`` slot.
+
+    Reproduces CR-01 directly: a scorer with no opinion (always ties against an
+    identical baseline) used to be silently scored "correct" whenever the
+    *first* id of the triple happened to be the preferred one — which is
+    exactly the convention ``api.py``/``cli.py`` always use in production
+    (``(winner, loser, winner)``). Both pair-position conventions are checked
+    here so the historically-tested "preferred == bid" fixture convention can
+    never again mask a regression of this exact bug.
+    """
+    cands = [{"id": "c0", "baseline": 1.0}, {"id": "c1", "baseline": 1.0}]
+    amap = {
+        "c0": _result(colorfulness=0.5),
+        "c1": _result(colorfulness=0.5),
+    }
+
+    def zero_scorer(_: AnalysisResult) -> float:
+        return 0.0
+
+    # PRODUCTION-STYLE convention: preferred id always in the `aid` (first) slot.
+    production_style = evaluate(
+        zero_scorer, zero_scorer, cands, amap, [("c0", "c1", "c0")],
+        sample_efficiency_pairs=0,
+    )
+    # UNBIASED convention: preferred id always in the `bid` (second) slot —
+    # the convention every pre-existing fixture in this repo happened to use.
+    unbiased = evaluate(
+        zero_scorer, zero_scorer, cands, amap, [("c1", "c0", "c0")],
+        sample_efficiency_pairs=0,
+    )
+    assert production_style.held_out_accuracy == 0.0
+    assert unbiased.held_out_accuracy == 0.0
+    # Position-independent: identical result either way, never a coin-flip winner.
+    assert production_style.held_out_accuracy == unbiased.held_out_accuracy
+
+
+# ---------------------------------------------------------------------------
 # PairwiseEvidence round-trip
 # ---------------------------------------------------------------------------
 

@@ -1979,12 +1979,21 @@ def _taste_compare(args: argparse.Namespace) -> int:
         # A held-out vote's winner/loser must still be a current analyzed
         # candidate — a vote can outlive its entry's analysis (re-analysis,
         # deletion); skip rather than KeyError deep inside evaluate().
+        #
+        # CR-01 defense-in-depth: position in the (aid, bid, preferred) triple
+        # is assigned by a stable, vote-independent key (numeric min/max of the
+        # two entry ids), never "winner always in the aid slot" — evaluate()/
+        # compare_heads() no longer credit ties either way, but this also keeps
+        # the *shape* of held_out_pairs itself uncorrelated with which id won,
+        # so no future evaluation mechanism can silently reintroduce this exploit.
         analyzed_ids = set(analysis_map)
-        held_out_pairs = [
-            (str(v.winner_entry_id), str(v.loser_entry_id), str(v.winner_entry_id))
-            for v in held_out_records
-            if str(v.winner_entry_id) in analyzed_ids and str(v.loser_entry_id) in analyzed_ids
-        ]
+        held_out_pairs: list[tuple[str, str, str]] = []
+        for v in held_out_records:
+            winner_id, loser_id = v.winner_entry_id, v.loser_entry_id
+            if str(winner_id) not in analyzed_ids or str(loser_id) not in analyzed_ids:
+                continue
+            aid, bid = (winner_id, loser_id) if winner_id < loser_id else (loser_id, winner_id)
+            held_out_pairs.append((str(aid), str(bid), str(winner_id)))
         embedding_store = EmbeddingStore(catalog)
         training_votes = resolve_vote_vectors(
             training_records, embedding_store, provider.model_version
