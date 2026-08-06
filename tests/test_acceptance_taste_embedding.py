@@ -16,28 +16,49 @@ drives the subsystem objects directly (``TasteVoteStore``, ``OnnxEmbeddingProvid
   bit-identical on repeat calls; a missing model reports ``probe().ok is False``
   cleanly, never an exception; a cross-``model_version`` comparison raises
   ``EmbeddingVersionError`` rather than returning a plausible-looking float.
-
-Scenarios C (R041 — head), D (R042 — attribution/exemplars), E (R043 — comparison),
-and F (structural reachability) land in the same file as this milestone's plan
-progresses; this module grows incrementally, each scenario independently runnable.
+* Scenario C (R041) — head: the explicit, exact-equality zero-vote parity assertion
+  (mirrors ``tests/test_taste_dialogue_upstream.py``'s
+  ``test_every_consumer_degrades_to_baseline_on_an_empty_profile``'s exact-``==``
+  style, not ``pytest.approx``), determinism, and the non-tautological
+  ``capacity == len(vote_terms)`` guard at 2+ vote counts in the same scenario.
+* Scenario D (R042) — attribution + exemplars: contributions sum exactly to the score;
+  ``find_exemplars`` never returns a non-liked vector even when it is numerically
+  closer; ``attribution.py`` imports no LLM/extraction machinery (structural scan).
+* Scenario E (R043) — comparison: an underpowered fixture reports
+  ``insufficient_evidence`` (a property of the data, not a permanently-stuck code
+  path); a well-powered fixture reaches a real decision; ``HeadComparison``/
+  ``compare.py`` carry no field or code path that deletes the incumbent lens head.
+* Scenario F (reachability) — the check this milestone exists to run: every public
+  symbol M009 added is referenced by ``cli.py``/``api.py``, and every table it added
+  or extended has a production ``INSERT`` writer in ``src/curator/`` — the automated
+  restatement of the M007 audit's Finding 0.
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
 import io
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 from PIL import Image
 
+import curator.taste.embedding.attribution as attribution_module
+import curator.taste.embedding.compare as compare_module
 from curator.analysis.schema import AnalysisResult, ColorStory, QualitySignals
 from curator.catalog import Catalog
+from curator.taste.embedding.attribution import attribute_score, find_exemplars
+from curator.taste.embedding.compare import MIN_DISCORDANT_PAIRS, HeadComparison, compare_heads
 from curator.taste.embedding.errors import EmbeddingVersionError
+from curator.taste.embedding.head import VoteVectors, fit_embedding_head
 from curator.taste.embedding.provider import EMBEDDING_DIM, OnnxEmbeddingProvider
 from curator.taste.embedding.store import EmbeddingStore, cosine_similarity
+from curator.taste.pairwise import Scorer
 from curator.taste.store import TasteVoteStore, next_pair
 
 FIXTURE_MODEL = Path(__file__).parent / "fixtures" / "tiny_embedding_model.onnx"
@@ -60,6 +81,15 @@ def _catalog_analysis(sha: str, colorfulness: float) -> AnalysisResult:
         asset_id=sha,
         quality=QualitySignals(aesthetic_quality=0.5, technical_quality=0.5),
         color_story=ColorStory(colorfulness=colorfulness, harmony=0.5),
+    )
+
+
+def _candidate_result(cid: str, colorfulness: float) -> AnalysisResult:
+    """A synthetic candidate whose ``asset_id`` is its own candidate id (compare fixtures)."""
+    return AnalysisResult(
+        asset_id=cid,
+        quality=QualitySignals(aesthetic_quality=0.5),
+        color_story=ColorStory(colorfulness=colorfulness),
     )
 
 
@@ -96,6 +126,29 @@ def _seed_catalog(data_root, entries: int = 6, quality_score: float | None = 0.5
         db.commit()
     finally:
         catalog.db.close()
+
+
+def _synthetic_votes(n: int, dim: int = EMBEDDING_DIM, seed: int = 0) -> list[VoteVectors]:
+    """*n* votes with random (but fixed-seed) winner/loser vectors (mirrors S03/S04)."""
+    rng = np.random.RandomState(seed)
+    votes = []
+    for i in range(n):
+        winner = rng.uniform(-1.0, 1.0, size=(dim,)).astype(np.float32)
+        loser = rng.uniform(-1.0, 1.0, size=(dim,)).astype(np.float32)
+        votes.append(
+            VoteVectors(
+                vote_group=f"acceptance-synthetic-{i}",
+                winner_entry_id=2 * i + 1,
+                loser_entry_id=2 * i + 2,
+                winner_vector=winner,
+                loser_vector=loser,
+            )
+        )
+    return votes
+
+
+def _zero_scorer(analysis: AnalysisResult) -> float:
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -212,3 +265,248 @@ def test_acceptance_taste_embedding_module_has_no_network_imports() -> None:
         elif isinstance(node, ast.ImportFrom) and node.module:
             found.add(node.module.split(".")[0])
     assert not (found & banned)
+
+
+# ---------------------------------------------------------------------------
+# Scenario C — head (R041)
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_taste_embedding_head_zero_vote_parity_and_capacity_guard() -> None:
+    """Exact zero-vote parity, determinism, and the non-tautological capacity guard."""
+    zero_head = fit_embedding_head([], "acceptance-v1")
+    # exact `==`, not pytest.approx — mirrors the exact-equality style established at
+    # tests/test_taste_dialogue_upstream.py's
+    # test_every_consumer_degrades_to_baseline_on_an_empty_profile
+    assert zero_head.score(np.ones(EMBEDDING_DIM, dtype=np.float32)) == 0.0
+    assert zero_head.vote_terms == ()
+
+    votes = _synthetic_votes(30)
+    head1 = fit_embedding_head(votes, "acceptance-v1")
+    head2 = fit_embedding_head(votes, "acceptance-v1")
+    assert head1.alpha == head2.alpha
+    assert len(head1.vote_terms) == len(head2.vote_terms)
+    assert all(np.array_equal(a, b) for a, b in zip(head1.vote_terms, head2.vote_terms))
+
+    # Non-tautological: a head that echoed a fake `capacity` while retaining a
+    # fixed-size representation would fail this at 2+ independent N values.
+    for n in (3, 15):
+        head = fit_embedding_head(votes[:n], "acceptance-v1")
+        assert head.capacity == n
+        assert len(head.vote_terms) == n
+        assert head.capacity == len(head.vote_terms)
+
+
+# ---------------------------------------------------------------------------
+# Scenario D — attribution + exemplars (R042)
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_taste_embedding_attribution_sums_to_score_and_exemplars_own_set_only(
+    data_root,
+):
+    """Attribution sums exactly to the score; exemplars never leak a closer non-liked vector."""
+    votes = _synthetic_votes(5, seed=7)
+    head = fit_embedding_head(votes, "acceptance-v1")
+    rng = np.random.RandomState(42)
+    query = rng.uniform(-1.0, 1.0, size=(EMBEDDING_DIM,)).astype(np.float32)
+
+    result = attribute_score(query, head, votes)
+    total = sum(c["contribution"] for c in result.contributions)
+    assert abs(total - result.score) < 1e-6
+
+    catalog = Catalog(data_root=data_root)
+    try:
+        liked_sha = "1" * 64
+        non_liked_sha = "2" * 64
+        catalog.db.execute("INSERT INTO content(sha256, size) VALUES (?, ?)", (liked_sha, 100))
+        catalog.db.execute(
+            "INSERT INTO content(sha256, size) VALUES (?, ?)", (non_liked_sha, 100)
+        )
+        catalog.db.commit()
+        embed_store = EmbeddingStore(catalog)
+
+        probe_vector = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        probe_vector[0] = 1.0
+        # non_liked is numerically identical to the probe (perfect cosine similarity);
+        # liked is only partially aligned. liked must still be the only result.
+        liked_vector = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+        liked_vector[0] = 0.5
+        liked_vector[1] = 0.5
+        non_liked_vector = probe_vector.copy()
+        embed_store.set(liked_sha, "acceptance-v1", liked_vector)
+        embed_store.set(non_liked_sha, "acceptance-v1", non_liked_vector)
+
+        exemplars = find_exemplars(
+            probe_vector,
+            [liked_sha],  # deliberately excludes non_liked_sha, though it is closer
+            {liked_sha: 1, non_liked_sha: 2},
+            embed_store,
+            "acceptance-v1",
+        )
+        assert exemplars
+        assert all(e.sha256 != non_liked_sha for e in exemplars)
+    finally:
+        catalog.db.close()
+
+    # no-LLM-rationale constraint, checked structurally
+    source = Path(attribution_module.__file__).read_text()
+    assert "dialogue.extraction" not in source
+    assert "CloudExtractionProvider" not in source
+
+
+# ---------------------------------------------------------------------------
+# Scenario E — comparison (R043)
+# ---------------------------------------------------------------------------
+
+
+def _well_powered_comparison_fixture() -> tuple[
+    list[dict[str, Any]],
+    dict[str, AnalysisResult],
+    list[VoteVectors],
+    list[tuple[str, str, str]],
+    dict[str, np.ndarray],
+]:
+    """30 candidates whose true preference increases along a hidden axis the lens
+    scorer never sees (every candidate has identical colorfulness); the embedding
+    head is trained on 20 correctly-labelled votes along that same axis.
+    """
+    n = 30
+    axis = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    axis[0] = 1.0
+    candidates = [{"id": f"w{i}", "baseline": 0.0} for i in range(n)]
+    analysis_map = {f"w{i}": _candidate_result(f"w{i}", colorfulness=0.5) for i in range(n)}
+    vector_by_id = {f"w{i}": (i * axis).astype(np.float32) for i in range(n)}
+    zero_vec = np.zeros(EMBEDDING_DIM, dtype=np.float32)
+    training_votes = [
+        VoteVectors(
+            vote_group=f"acceptance-well-powered-{i}",
+            winner_entry_id=1000 + i,
+            loser_entry_id=2000 + i,
+            winner_vector=axis.copy(),
+            loser_vector=zero_vec.copy(),
+        )
+        for i in range(20)
+    ]
+    held_out_pairs = [(f"w{2 * k}", f"w{2 * k + 1}", f"w{2 * k + 1}") for k in range(n // 2)]
+    return candidates, analysis_map, training_votes, held_out_pairs, vector_by_id
+
+
+def _embedding_scorer_factory_from_vectors(
+    vector_by_id: dict[str, np.ndarray],
+) -> Callable[[Sequence[VoteVectors]], Scorer]:
+    """Same shape as ``cli.py``'s/``api.py``'s production factory (S05 precedent):
+    refit fresh per call, score via a pre-resolved ``asset_id -> vector`` map.
+    """
+
+    def factory(votes_subset: Sequence[VoteVectors]) -> Scorer:
+        head = fit_embedding_head(list(votes_subset), "acceptance-v1")
+
+        def scorer(analysis: AnalysisResult) -> float:
+            vector = vector_by_id.get(analysis.asset_id)
+            return head.score(vector) if vector is not None else 0.0
+
+        return scorer
+
+    return factory
+
+
+def test_acceptance_taste_embedding_comparison_insufficient_then_decisive() -> None:
+    """Too few held-out pairs -> insufficient_evidence; a well-powered fixture reaches a
+    real decision; HeadComparison/compare.py carry no field or branch that removes the
+    lens head."""
+    # -- underpowered: only 3 held-out pairs, can never reach MIN_DISCORDANT_PAIRS (10) --
+    n = 6
+    small_candidates = [{"id": f"u{i}", "baseline": 0.0} for i in range(n)]
+    small_analysis = {
+        f"u{i}": _candidate_result(f"u{i}", colorfulness=i / (n - 1)) for i in range(n)
+    }
+
+    def lens_scorer(analysis: AnalysisResult) -> float:
+        return analysis.color_story.colorfulness
+
+    def disagreeing_embedding_factory(votes_subset: Sequence[VoteVectors]) -> Scorer:
+        def scorer(analysis: AnalysisResult) -> float:
+            return -analysis.color_story.colorfulness  # always disagrees with lens_scorer
+
+        return scorer
+
+    underpowered_pairs = [("u0", "u1", "u1"), ("u2", "u3", "u3"), ("u4", "u5", "u5")]
+    underpowered = compare_heads(
+        training_votes=[],
+        held_out_pairs=underpowered_pairs,
+        candidates=small_candidates,
+        analysis_map=small_analysis,
+        lens_scorer=lens_scorer,
+        embedding_scorer_factory=disagreeing_embedding_factory,
+        baseline_scorer=_zero_scorer,
+    )
+    assert underpowered.discordant_pairs < MIN_DISCORDANT_PAIRS
+    assert underpowered.verdict == "insufficient_evidence"
+    assert underpowered.head_to_head_accuracy is None
+    assert underpowered.head_to_head_ci is None
+
+    # -- well-powered: a real decision is reachable, not a permanently stuck code path --
+    candidates, analysis_map, training_votes, held_out_pairs, vector_by_id = (
+        _well_powered_comparison_fixture()
+    )
+    decisive = compare_heads(
+        training_votes=training_votes,
+        held_out_pairs=held_out_pairs,
+        candidates=candidates,
+        analysis_map=analysis_map,
+        lens_scorer=_zero_scorer,
+        embedding_scorer_factory=_embedding_scorer_factory_from_vectors(vector_by_id),
+        baseline_scorer=_zero_scorer,
+    )
+    assert decisive.discordant_pairs >= MIN_DISCORDANT_PAIRS
+    assert decisive.verdict in {"embedding_better", "lens_better"}
+
+    # -- HeadComparison carries no field, and compare.py no branch, that removes the
+    # -- lens head (T-09-10), mirroring S05's own unit-level guard.
+    field_names = [f.name.lower() for f in dataclasses.fields(HeadComparison)]
+    assert not any("delete" in name or "retire" in name for name in field_names)
+    source = Path(compare_module.__file__).read_text()
+    assert "DELETE FROM" not in source
+    assert "DROP TABLE" not in source
+    assert "save_profile" not in source
+
+
+# ---------------------------------------------------------------------------
+# Scenario F — reachability: the check this milestone exists to run
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_taste_embedding_reachability_symbols_and_table_writers() -> None:
+    """Every public symbol M009 added is referenced by cli.py/api.py, and every table
+    it added or extended has a production INSERT writer in src/curator/ — the
+    automated restatement of the M007 audit's Finding 0.
+    """
+    symbols = [
+        "TasteVoteStore",
+        "next_pair",
+        "OnnxEmbeddingProvider",
+        "EmbeddingStore",
+        "fit_embedding_head",
+        "attribute_score",
+        "find_exemplars",
+        "compare_heads",
+    ]
+    repo_root = Path(__file__).resolve().parents[1]
+    cli_source = (repo_root / "src" / "curator" / "cli.py").read_text()
+    api_source = (repo_root / "src" / "curator" / "api.py").read_text()
+    for symbol in symbols:
+        assert symbol in cli_source or symbol in api_source, (
+            f"{symbol} is unreachable from both cli.py and api.py"
+        )
+
+    src_root = repo_root / "src" / "curator"
+    combined = "\n".join(
+        path.read_text() for path in sorted(src_root.rglob("*.py")) if "tests" not in path.parts
+    )
+    for statement in (
+        "INSERT INTO taste_profiles",
+        "INSERT INTO taste_preferences",
+        "INSERT INTO content_embeddings",
+    ):
+        assert statement in combined, f"no production writer found for: {statement}"
