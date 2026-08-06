@@ -61,6 +61,16 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                self-check. Always exits 0 (``ok=False`` reports
                                cleanly, same as ``embed-status``, when no model
                                is available).
+- ``curator taste embedding-explain PATH_OR_SHA [--json]`` — explain one
+                               embedding-head score (M009/S04): fits the head
+                               fresh over every resolvable vote, then reports
+                               its exact per-vote attribution (summing back to
+                               the score), up to three nearest-neighbour
+                               exemplars from the user's own liked images, and
+                               a deterministic template ``rationale`` — no
+                               saliency map, no LLM narration. ``ok=False``
+                               reports cleanly (``EXIT_NO_CHANGE``) when no
+                               model is available, same as ``embedding-head``.
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -72,6 +82,7 @@ import argparse
 import dataclasses
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -133,6 +144,7 @@ from curator.taste.dialogue.retention import save_to_catalog
 from curator.taste.dialogue.room import ReactionRoom
 from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore
+from curator.taste.embedding.attribution import attribute_score, find_exemplars, render_rationale
 from curator.taste.embedding.head import (
     EmbeddingHead,
     fit_embedding_head,
@@ -144,7 +156,7 @@ from curator.taste.embedding.provider import (
     OnnxEmbeddingProvider,
 )
 from curator.taste.embedding.store import EmbeddingStore
-from curator.taste.store import TasteVoteStore, next_pair
+from curator.taste.store import TasteVoteStore, VoteRecord, next_pair
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
 # 3=no-change. Every subcommand returns one of these; ``main`` maps uncaught
@@ -157,6 +169,10 @@ EXIT_NO_CHANGE = 3
 # Connector instance used for ad-hoc ``catalog add`` invocations. The source identity
 # is the normalized absolute file path, consistent with LocalConnector semantics.
 _CLI_CONNECTOR_ID = "cli-local"
+
+# 64-hex content sha256 (mirrors ``api.py``'s ``_SHA_RE``) — a ``path_or_sha`` argument
+# fully matching this pattern is a direct content sha lookup, not a filesystem path.
+_SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 # Known render targets (name -> pixel dimensions) for ``propose`` / ``manifest``.
 _TARGET_SPECS: dict[str, tuple[int, int]] = {
@@ -487,6 +503,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the fit result as JSON",
+    )
+
+    embedding_explain = taste_sub.add_parser(
+        "embedding-explain",
+        help="explain one embedding-head score: per-vote attribution + nearest "
+        "liked exemplars (M009/S04)",
+    )
+    embedding_explain.add_argument(
+        "path_or_sha", help="image path (LocalConnector semantics) or 64-hex content sha256"
+    )
+    embedding_explain.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the explanation as JSON",
     )
 
     headless = sub.add_parser(
@@ -1358,6 +1388,8 @@ def _taste(args: argparse.Namespace) -> int:
         return _taste_embed_status(args)
     if args.taste_command == "embedding-head":
         return _taste_embedding_head(args)
+    if args.taste_command == "embedding-explain":
+        return _taste_embedding_explain(args)
     return EXIT_FATAL
 
 
@@ -1681,6 +1713,134 @@ def _taste_embedding_head(args: argparse.Namespace) -> int:
             f" {direction_norm:.6f}"
         )
         print(f"  zero-vote parity: {'OK' if zero_check == 0.0 else 'FAIL'} (score={zero_check})")
+    return EXIT_OK
+
+
+def _taste_embedding_resolve(catalog: Catalog, path_or_sha: str) -> tuple[int, str]:
+    """Resolve *path_or_sha* to ``(entry_id, sha256)``.
+
+    A 64-hex string is treated as a direct content sha lookup (mirrors ``api.py``'s
+    ``_SHA_RE`` usage); anything else is resolved as a filesystem path via
+    :func:`resolve_catalog_entry`/:class:`LocalConnector`, the same way
+    ``_review_resolve`` does. Raises :class:`CatalogEntryNotFound` when nothing matches
+    — caught by :func:`main` and mapped to :data:`EXIT_FATAL`, same as every other
+    catalog-lookup miss in this CLI.
+    """
+    if _SHA_RE.fullmatch(path_or_sha):
+        sha = path_or_sha.lower()
+        row = catalog.db.execute(
+            "SELECT id FROM catalog_entries WHERE sha256 = ? ORDER BY id DESC LIMIT 1",
+            (sha,),
+        ).fetchone()
+        if row is None:
+            raise CatalogEntryNotFound(f"no catalog entry for sha256={sha}")
+        return int(row[0]), sha
+    path = Path(path_or_sha).resolve()
+    connector = LocalConnector(path.parent)
+    entry_id = resolve_catalog_entry(catalog, connector.connector_id, str(path))
+    row = catalog.db.execute(
+        "SELECT sha256 FROM catalog_entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    return entry_id, str(row[0]) if row else ""
+
+
+def _taste_liked_shas(
+    catalog: Catalog, votes: list[VoteRecord]
+) -> tuple[list[str], dict[str, int]]:
+    """Return ``(liked_shas, sha_to_entry_id)`` for every non-retracted vote winner.
+
+    ``liked_shas`` is what
+    :func:`~curator.taste.embedding.attribution.find_exemplars` restricts its search to
+    — resolved here (not inside that otherwise-pure function) so it never needs a hidden
+    catalog dependency.
+    """
+    winner_ids = sorted({v.winner_entry_id for v in votes if not v.retracted})
+    if not winner_ids:
+        return [], {}
+    placeholders = ",".join("?" for _ in winner_ids)
+    rows = catalog.db.execute(
+        f"SELECT id, sha256 FROM catalog_entries WHERE id IN ({placeholders})",
+        winner_ids,
+    ).fetchall()
+    sha_to_entry_id = {str(sha): int(entry_id) for entry_id, sha in rows}
+    return list(sha_to_entry_id.keys()), sha_to_entry_id
+
+
+def _taste_embedding_explain(args: argparse.Namespace) -> int:
+    """Explain one embedding-head score: per-vote attribution + nearest liked exemplars.
+
+    Resolves ``path_or_sha`` to a catalog entry, probes the embedding provider
+    (``ok=False`` -> the not-available message, :data:`EXIT_NO_CHANGE`, same pattern as
+    ``embedding-head``), fetches (embedding on demand when missing, mirroring
+    ``embed-status``'s ``--backfill`` logic) the entry's stored vector, fits the head
+    fresh over every resolvable vote (S03 — this command persists nothing, matching
+    ``embedding-head``'s own posture), then reports
+    :func:`~curator.taste.embedding.attribution.attribute_score`,
+    :func:`~curator.taste.embedding.attribution.find_exemplars`, and
+    :func:`~curator.taste.embedding.attribution.render_rationale` over it. Always exits
+    :data:`EXIT_OK` once the report is produced — a report with zero
+    contributions/exemplars is a valid, honest answer, not a failure.
+    """
+    catalog = Catalog()
+    try:
+        entry_id, sha = _taste_embedding_resolve(catalog, args.path_or_sha)
+        provider = OnnxEmbeddingProvider()
+        probe = provider.probe()
+        if not probe.ok:
+            if args.json:
+                print(
+                    json.dumps(
+                        {"ok": False, "backend": probe.backend.value, "message": probe.message},
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                print(f"taste embedding-explain: ok=False backend={probe.backend.value}")
+                print(f"  {probe.message}")
+            return EXIT_NO_CHANGE
+        store = EmbeddingStore(catalog)
+        stored = store.get(sha, provider.model_version)
+        if stored is None:
+            vector = provider.embed(catalog.content.get(sha))
+            store.set(sha, provider.model_version, vector)
+        else:
+            vector = stored.vector
+        vote_records = TasteVoteStore(catalog).votes()
+        vote_vectors = resolve_vote_vectors(vote_records, store, provider.model_version)
+        head = fit_embedding_head(vote_vectors, provider.model_version)
+        liked_shas, sha_to_entry_id = _taste_liked_shas(catalog, vote_records)
+        attribution = attribute_score(vector, head, vote_vectors)
+        exemplars = find_exemplars(
+            vector, liked_shas, sha_to_entry_id, store, provider.model_version
+        )
+        rationale = render_rationale(attribution, exemplars)
+    finally:
+        catalog.db.close()
+    result: dict[str, Any] = {
+        "entry_id": entry_id,
+        "sha256": sha,
+        "score": attribution.score,
+        "rationale": rationale,
+        "contributions": attribution.contributions,
+        "exemplars": [e.to_dict() for e in exemplars],
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"taste embedding-explain: entry {entry_id} sha256={sha[:12]}")
+        print(f"  score={result['score']:+.4f} — {rationale}")
+        if attribution.contributions:
+            print("  contributions:")
+            for c in attribution.contributions:
+                print(f"    [{c['vote_group']}] {c['contribution']:+.4f}")
+        else:
+            print("  contributions: (none — no votes resolvable yet)")
+        if exemplars:
+            print("  exemplars:")
+            for e in exemplars:
+                print(f"    {e.sha256[:12]} (entry {e.entry_id}, similarity {e.similarity:.3f})")
+        else:
+            print("  exemplars: (none yet)")
     return EXIT_OK
 
 
