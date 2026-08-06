@@ -202,7 +202,15 @@ def _all_pairs(ids):
 
 
 def _evaluate_like(prof, cands, amap, holdouts):
-    return evaluate(prof, default_profile(), cands, amap, holdouts)
+    ranker = TasteRanker()
+    return evaluate(
+        lambda a: ranker.personal_delta(a, prof)[0],
+        lambda a: 0.0,
+        cands,
+        amap,
+        holdouts,
+        sample_efficiency_pairs=prof.version - 1,
+    )
 
 
 def test_evaluate_trained_profile_beats_baseline():

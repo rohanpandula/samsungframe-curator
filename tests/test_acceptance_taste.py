@@ -214,14 +214,28 @@ def test_acceptance_taste_pairwise_evidence_and_promotion(data_root):
         base = apply_preference(base, sv[pid], sv[qid], prefer_a=prefer_p)
         used.add(frozenset((pid, qid)))
 
-    ev = evaluate(base, default_profile(), all_cands, all_map, holdouts)
+    ev = evaluate(
+        lambda a: TasteRanker().personal_delta(a, base)[0],
+        lambda a: 0.0,
+        all_cands,
+        all_map,
+        holdouts,
+        sample_efficiency_pairs=base.version - 1,
+    )
     assert ev.held_out_pairs == 1
     assert ev.held_out_accuracy == 1.0
     assert ev.ranking_lift_vs_baseline > 0.0
     assert ev.sample_efficiency_pairs >= 1
 
     # The trained (matching) model scores higher than the inert baseline.
-    base_ev = evaluate(default_profile(), default_profile(), all_cands, all_map, holdouts)
+    base_ev = evaluate(
+        lambda a: 0.0,
+        lambda a: 0.0,
+        all_cands,
+        all_map,
+        holdouts,
+        sample_efficiency_pairs=default_profile().version - 1,
+    )
     assert ev.held_out_accuracy > base_ev.held_out_accuracy
     assert ev.ranking_lift_vs_baseline > base_ev.ranking_lift_vs_baseline
 
