@@ -45,6 +45,14 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
 - ``curator taste retract VOTE_GROUP`` — retract a vote by its ``vote_group`` id,
                                reversing its effect on the persisted profile without
                                deleting history (exit 3 when no vote carries that id).
+- ``curator taste embed-status [--backfill] [--json]`` — report whether the
+                               local embedding subsystem (M009/S02) is usable
+                               (model placed, checksum verified if pinned) with
+                               no network call either way; ``--backfill``
+                               computes and stores vectors for every catalog
+                               entry lacking a current-model-version embedding.
+                               Always exits 0 once the probe runs — this is the
+                               milestone's documented early-exit checkpoint.
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -115,6 +123,8 @@ from curator.taste.dialogue.retention import save_to_catalog
 from curator.taste.dialogue.room import ReactionRoom
 from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore
+from curator.taste.embedding.provider import OnnxEmbeddingProvider
+from curator.taste.embedding.store import EmbeddingStore
 from curator.taste.store import TasteVoteStore, next_pair
 
 # Documented exit-code contract (S04): 0=ok, 1=partial/warnings, 2=fatal,
@@ -431,6 +441,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the retraction result as JSON",
+    )
+
+    embed_status = taste_sub.add_parser(
+        "embed-status",
+        help="report whether the local embedding subsystem is usable (M009/S02)",
+    )
+    embed_status.add_argument(
+        "--backfill",
+        action="store_true",
+        help="compute + store embeddings for every catalog entry lacking one "
+        "(only runs when the probe reports ok)",
+    )
+    embed_status.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the probe/backfill result as JSON",
     )
 
     headless = sub.add_parser(
@@ -1298,6 +1324,8 @@ def _taste(args: argparse.Namespace) -> int:
         return _taste_votes(args)
     if args.taste_command == "retract":
         return _taste_retract(args)
+    if args.taste_command == "embed-status":
+        return _taste_embed_status(args)
     return EXIT_FATAL
 
 
@@ -1503,6 +1531,50 @@ def _taste_retract(args: argparse.Namespace) -> int:
         return EXIT_OK
     finally:
         catalog.db.close()
+
+
+def _taste_embed_status(args: argparse.Namespace) -> int:
+    """Report whether the local embedding subsystem is usable, optionally backfilling.
+
+    Constructs :class:`~curator.taste.embedding.provider.OnnxEmbeddingProvider`
+    with default path resolution and calls :meth:`probe`. With ``--backfill`` and
+    a passing probe, computes + stores a vector for every catalog entry lacking
+    one under the current model version. Always exits :data:`EXIT_OK` once the
+    probe runs — even ``ok=False`` is a successful *report*, not a CLI failure;
+    this command's whole job is to answer "is this available", which is the
+    milestone's documented early-exit checkpoint.
+    """
+    provider = OnnxEmbeddingProvider()
+    probe = provider.probe()
+    result: dict[str, Any] = {
+        "ok": probe.ok,
+        "backend": probe.backend.value,
+        "message": probe.message,
+    }
+    computed = 0
+    if probe.ok and args.backfill:
+        catalog = Catalog()
+        try:
+            store = EmbeddingStore(catalog)
+            for entry in catalog.list_entries():
+                sha = entry["sha256"]
+                if store.get(sha, provider.model_version) is not None:
+                    continue
+                data = catalog.content.get(sha)
+                vector = provider.embed(data)
+                store.set(sha, provider.model_version, vector)
+                computed += 1
+        finally:
+            catalog.db.close()
+        result["backfilled"] = computed
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"taste embed-status: ok={result['ok']} backend={result['backend']}")
+        print(f"  {result['message']}")
+        if probe.ok and args.backfill:
+            print(f"  backfilled {computed} embedding(s)")
+    return EXIT_OK
 
 
 def _format_taste_profile(profile: DialogueProfile) -> str:
