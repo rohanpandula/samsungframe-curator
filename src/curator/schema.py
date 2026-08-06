@@ -552,6 +552,40 @@ CREATE INDEX IF NOT EXISTS idx_taste_profile_events_claim
     ON taste_profile_events(claim_id);
 """
 
+# Migration v16 (M009/S01): adds vote-pairing + retraction columns to
+# ``taste_preferences``. This is a mechanical version-allocation correction, not a
+# policy change — 01-CONTEXT.md's "Files Likely Touched" note anticipated "v16
+# (embeddings BLOB)" for this milestone, but S01's vote-pairing decision claims v16
+# first; the embeddings BLOB table (S02) is now v17. ``EXPECTED_TABLES`` is
+# unchanged (no new table, only columns).
+#
+# ``taste_preferences`` (v13) is flat and entry-scoped — (id, profile_id,
+# catalog_entry_id, preference, note, created_at) — with no column linking the two
+# entries compared in one pairwise vote. Research confirmed the only existing
+# writers are test fixtures approximating a vote as two independently-inserted
+# rows. This migration adds:
+#
+# - ``vote_group``   — groups the winner row + loser row of one
+#   ``curator taste vote`` call so history is group-recoverable.
+# - ``retracted_at`` — NULL = active; a non-NULL timestamp marks the row retracted
+#   without deleting it, mirroring the append-only posture of
+#   ``taste_observations``/``taste_profile_events``. History is never erased.
+#
+# Following the v2/v3 "one ADD COLUMN per statement" convention (SQLite forbids a
+# multi-column ALTER), each column is its own statement. Both are nullable with no
+# DEFAULT, so every existing pre-M009 row — including every test fixture's raw
+# 4-column ``INSERT INTO taste_preferences(profile_id, catalog_entry_id,
+# preference, note) VALUES (...)`` — reads back NULL for both and is simply
+# excluded from the new grouped-replay logic (``vote_group IS NOT NULL`` gate); no
+# existing test breaks.
+SCHEMA_V16_SQL = """
+ALTER TABLE taste_preferences ADD COLUMN vote_group TEXT;
+ALTER TABLE taste_preferences ADD COLUMN retracted_at TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_taste_preferences_vote_group
+    ON taste_preferences(vote_group);
+"""
+
 # Ordered hand-written linear migrations: ``(schema_version, ddl)``.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, SCHEMA_V1_SQL),
@@ -569,6 +603,7 @@ MIGRATIONS: list[tuple[int, str]] = [
     (13, SCHEMA_V13_SQL),
     (14, SCHEMA_V14_SQL),
     (15, SCHEMA_V15_SQL),
+    (16, SCHEMA_V16_SQL),
 ]
 
 # Highest applied schema version (== PRAGMA user_version after migrate()).
