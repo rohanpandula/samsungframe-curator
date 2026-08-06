@@ -53,6 +53,14 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                entry lacking a current-model-version embedding.
                                Always exits 0 once the probe runs — this is the
                                milestone's documented early-exit checkpoint.
+- ``curator taste embedding-head [--json]`` — fit the nonparametric
+                               preference head (M009/S03) over every vote
+                               resolvable against S02 embeddings and report
+                               ``capacity`` alongside the literal
+                               retained-parameter count and a zero-vote parity
+                               self-check. Always exits 0 (``ok=False`` reports
+                               cleanly, same as ``embed-status``, when no model
+                               is available).
 
 The CLI resolves all paths through the six-axis config (``CURATOR_DATA_ROOT``), so it
 honors that environment variable wherever it points the data root.
@@ -68,6 +76,8 @@ import shutil
 import sys
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from curator import api as api_module
 from curator import db
@@ -123,7 +133,16 @@ from curator.taste.dialogue.retention import save_to_catalog
 from curator.taste.dialogue.room import ReactionRoom
 from curator.taste.dialogue.session import TasteSession
 from curator.taste.dialogue.store import ObservationStore
-from curator.taste.embedding.provider import OnnxEmbeddingProvider
+from curator.taste.embedding.head import (
+    EmbeddingHead,
+    fit_embedding_head,
+    resolve_vote_vectors,
+)
+from curator.taste.embedding.provider import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL_VERSION,
+    OnnxEmbeddingProvider,
+)
 from curator.taste.embedding.store import EmbeddingStore
 from curator.taste.store import TasteVoteStore, next_pair
 
@@ -457,6 +476,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the probe/backfill result as JSON",
+    )
+
+    embedding_head = taste_sub.add_parser(
+        "embedding-head",
+        help="fit the nonparametric embedding preference head over resolvable "
+        "votes (M009/S03)",
+    )
+    embedding_head.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the fit result as JSON",
     )
 
     headless = sub.add_parser(
@@ -1326,6 +1356,8 @@ def _taste(args: argparse.Namespace) -> int:
         return _taste_retract(args)
     if args.taste_command == "embed-status":
         return _taste_embed_status(args)
+    if args.taste_command == "embedding-head":
+        return _taste_embedding_head(args)
     return EXIT_FATAL
 
 
@@ -1574,6 +1606,81 @@ def _taste_embed_status(args: argparse.Namespace) -> int:
         print(f"  {result['message']}")
         if probe.ok and args.backfill:
             print(f"  backfilled {computed} embedding(s)")
+    return EXIT_OK
+
+
+def _taste_embedding_head(args: argparse.Namespace) -> int:
+    """Fit the nonparametric embedding head (M009/S03) and report its shape.
+
+    Delegates availability to the same
+    :meth:`~curator.taste.embedding.provider.OnnxEmbeddingProvider.probe` S02's
+    ``embed-status`` reports — ``ok=False`` reuses its ``message`` field
+    verbatim (never a re-worded copy) and exits :data:`EXIT_NO_CHANGE`:
+    nothing to fit without a working provider, the visible early-exit
+    checkpoint an operator reaches naturally by trying this command. When
+    ``ok=True``, resolves every vote S01 recorded against S02's stored
+    vectors and fits the head, printing ``capacity`` alongside the literal
+    retained-parameter count (``len(head.vote_terms)``) so both are visible
+    and can be eyeballed as equal on every invocation — a live,
+    human-checkable proof of the R041 contract, not just a test assertion.
+    Always exits :data:`EXIT_OK` once the probe runs: reporting
+    ``capacity=0`` is a valid, successful report, not a failure.
+    """
+    provider = OnnxEmbeddingProvider()
+    probe = provider.probe()
+    if not probe.ok:
+        if args.json:
+            print(
+                json.dumps(
+                    {"ok": False, "backend": probe.backend.value, "message": probe.message},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"taste embedding-head: ok=False backend={probe.backend.value}")
+            print(f"  {probe.message}")
+        return EXIT_NO_CHANGE
+    catalog = Catalog()
+    try:
+        votes = TasteVoteStore(catalog).votes()
+        vote_vectors = resolve_vote_vectors(
+            votes, EmbeddingStore(catalog), EMBEDDING_MODEL_VERSION
+        )
+        head = fit_embedding_head(vote_vectors, EMBEDDING_MODEL_VERSION)
+    finally:
+        catalog.db.close()
+    zero_head = EmbeddingHead(
+        model_version=EMBEDDING_MODEL_VERSION,
+        dim=EMBEDDING_DIM,
+        vote_terms=(),
+        alpha=0.0,
+        capacity=0,
+        created_at="",
+        updated_at="",
+    )
+    zero_check = zero_head.score(np.random.RandomState(0).rand(EMBEDDING_DIM).astype(np.float32))
+    direction_norm = float(np.linalg.norm(head.effective_direction()))
+    result: dict[str, Any] = {
+        "ok": True,
+        "model_version": head.model_version,
+        "capacity": head.capacity,
+        "retained_parameters": len(head.vote_terms),
+        "effective_direction_norm": direction_norm,
+        "zero_vote_parity_ok": zero_check == 0.0,
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"taste embedding-head: capacity={result['capacity']}")
+        print(
+            f"  retained_parameters={result['retained_parameters']}"
+            " (structural cross-check: must equal capacity)"
+        )
+        print(
+            "  effective_direction() L2 norm (display summary only, not the head's state):"
+            f" {direction_norm:.6f}"
+        )
+        print(f"  zero-vote parity: {'OK' if zero_check == 0.0 else 'FAIL'} (score={zero_check})")
     return EXIT_OK
 
 
