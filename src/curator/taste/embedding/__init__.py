@@ -27,6 +27,7 @@ from curator.taste.embedding.provider import (
     resolve_expected_sha256,
     resolve_model_path,
 )
+from curator.taste.embedding.store import EmbeddingStore, StoredEmbedding, cosine_similarity
 
 __all__ = [
     "EMBEDDING_DIM",
@@ -34,9 +35,12 @@ __all__ = [
     "EmbeddingCapabilities",
     "EmbeddingError",
     "EmbeddingProvider",
+    "EmbeddingStore",
     "EmbeddingUnavailableError",
     "EmbeddingVersionError",
     "OnnxEmbeddingProvider",
+    "StoredEmbedding",
+    "cosine_similarity",
     "resolve_expected_sha256",
     "resolve_model_path",
 ]
