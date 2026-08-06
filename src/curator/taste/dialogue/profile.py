@@ -778,10 +778,16 @@ class ColdStartSeeder:
         ]
 
     def _pairwise_decisions(self) -> list[HistoryDecision]:
-        """Return the M007 pairwise preference rows (``preference`` 0 abstains)."""
+        """Return the M007 pairwise preference rows (``preference`` 0 abstains).
+
+        Excludes retracted M009 votes (``retracted_at IS NOT NULL``, schema v16)
+        so a retracted vote stops counting as low-provenance cold-start evidence.
+        Pre-M009 fixture rows (``vote_group``/``retracted_at`` both NULL) are
+        unaffected — ``retracted_at IS NULL`` is true for them too.
+        """
         rows = self.db.execute(
             "SELECT catalog_entry_id, preference, note, created_at"
-            " FROM taste_preferences WHERE preference != 0"
+            " FROM taste_preferences WHERE preference != 0 AND retracted_at IS NULL"
             " ORDER BY catalog_entry_id, id"
         ).fetchall()
         return [
