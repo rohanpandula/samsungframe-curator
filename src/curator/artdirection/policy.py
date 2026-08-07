@@ -31,19 +31,22 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from curator.analysis.schema import AnalysisResult
 from curator.artdirection.manifest import (
     _TREATMENT_SOURCE_COUNT,
+    CROP_FILL,
     MANIFEST_VERSION,
     MAX_LAYOUT_SOURCES,
     MULTI_CELL_TREATMENTS,
+    VALID_CROP_MODES,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
     ManifestError,
+    SourceRegion,
 )
 from curator.artdirection.packing import (
     Cell,
@@ -83,6 +86,17 @@ DIPTYCH_AFFINITY = 0.75
 #: and tolerates more variety than two adjacent panels, where any mismatch is
 #: read as a direct comparison between exactly two images.
 NUP_AFFINITY = 0.6
+
+#: How far a cell's aspect must depart from its source's before a crop pays
+#: for itself (M010/S05).
+#:
+#: A **stated, revisable engineering default, not a researched number.** Inside
+#: 10% the letterbox bars are a thin sliver, so cropping would throw away real
+#: pixels to recover almost no canvas: the cell letterboxes even when it would be
+#: perfectly safe to fill. Measured relative to the *source's* own aspect,
+#: because the question is how far the cell departs from the shape the image
+#: already has.
+CELL_CROP_ASPECT_TOLERANCE = 0.1
 
 #: Source count -> the named template that lays that many cells out (M010/S02).
 _NUP_TREATMENTS: dict[int, LayoutTreatment] = {
@@ -219,7 +233,7 @@ def propose_treatments(
     proposals: list[TreatmentProposal] = []
 
     crop = primary.crop_safety
-    safe_all = crop.safe_north and crop.safe_south and crop.safe_east and crop.safe_west
+    safe_all, min_margin = _crop_safety_gate(primary)
     directions = {
         "north": crop.safe_north,
         "south": crop.safe_south,
@@ -227,7 +241,6 @@ def propose_treatments(
         "west": crop.safe_west,
     }
     unsafe = [d for d, ok in directions.items() if not ok]
-    min_margin = min(crop.margin_north, crop.margin_south, crop.margin_east, crop.margin_west)
     aesthetic = primary.quality.aesthetic_quality
     margins = {
         "north": crop.margin_north,
@@ -316,12 +329,26 @@ def propose_treatments(
     ):
         affinity = _pair_affinity(results, provider)
         if affinity >= DIPTYCH_AFFINITY:
+            # A diptych is a two-cell layout like any other, so M010/S05 gives it
+            # the same per-cell fit record: without `cells` in evidence its crop
+            # decision could not survive the proposals-table round trip that
+            # `cli._manifest` performs, and both cells would silently letterbox.
+            pair = results[:2]
+            pair_shas = list(request.sources[:2])
+            pair_target = (request.target_width, request.target_height)
+            pair_cells = equal_cells(
+                pair_shas,
+                Cell(0, 0, pair_target[0], pair_target[1]),
+                gap=gutter_for_target(pair_target),
+            )
+            pair_fits = _cell_fits(pair, pair_cells)
             proposals.append(
                 TreatmentProposal(
                     treatment=LayoutTreatment.DIPTYCH,
                     rationale=[
                         f"pair affinity {affinity:.2f} >= {DIPTYCH_AFFINITY} with "
-                        f"two sources"
+                        f"two sources",
+                        _fit_rationale(pair_fits),
                     ],
                     score=round(affinity, 4),
                     evidence={
@@ -329,6 +356,17 @@ def propose_treatments(
                         "phash_distance": results[1].pairing.phash_distance,
                         "palette_distance": results[1].pairing.palette_distance,
                         "orientation_match": results[1].pairing.orientation_match,
+                        "cells": [
+                            {
+                                "sha": cell.source_sha256,
+                                "x": cell.x,
+                                "y": cell.y,
+                                "w": cell.w,
+                                "h": cell.h,
+                                **fit,
+                            }
+                            for cell, fit in zip(pair_cells, pair_fits, strict=True)
+                        ],
                     },
                 )
             )
@@ -406,10 +444,22 @@ def materialize_manifest(
     stored weights (every single-source treatment, and every pre-S03 row) packs
     uniformly, which is exactly S01's behavior.
 
+    **This function is the only writer of** ``crop="fill"`` **in the codebase**
+    (M010/S05), and it only ever copies a value the crop-safety gate in
+    :func:`_cell_fit` already approved for that source. That invariant is
+    load-bearing rather than tidy: the renderer holds no
+    :class:`~curator.analysis.schema.AnalysisResult` at render time and therefore
+    *cannot* re-verify crop safety, so it trusts this gate. Each crop is read out
+    of ``proposal.evidence["cells"]`` — keyed by sha, so a caller-reordered source
+    list moves each verdict with its own source rather than onto a neighbour's
+    cell — and validated against
+    :data:`~curator.artdirection.manifest.VALID_CROP_MODES`.
+
     Raises :class:`~curator.artdirection.manifest.ManifestError` when more than
     :data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES` sources are given,
-    or when a fixed-size named template is handed the wrong number of sources
-    (M010/S02) — rather than materializing a manifest
+    when a fixed-size named template is handed the wrong number of sources
+    (M010/S02), or when the stored per-cell fit is out of vocabulary or does not
+    cover this source count — rather than materializing a manifest
     :meth:`ArtDirectionManifest.validate` would reject, or one the renderer would
     quietly truncate.
     """
@@ -445,6 +495,11 @@ def materialize_manifest(
         Cell(0, 0, request.target_width, request.target_height),
         gap=gutter_for_target(target),
     )
+    crops = _manifest_crops(proposal, sources_sha)
+    regions = [
+        replace(region, crop=crops.get(region.source_sha256))
+        for region in regions
+    ]
     return ArtDirectionManifest(
         manifest_version=MANIFEST_VERSION,
         sources=list(sources_sha),
@@ -502,6 +557,52 @@ def _manifest_weights(
     return _coerce_weights(stored, len(sources_sha), origin="proposal evidence")
 
 
+def _manifest_crops(
+    proposal: TreatmentProposal, sources_sha: list[str]
+) -> dict[str, str | None]:
+    """Return the per-source fit *proposal* recorded, keyed by sha (M010/S05).
+
+    Read back out of ``evidence["cells"]`` for the same reason weights are
+    (M010/S03): ``cli._manifest`` re-materializes from a proposal **reloaded out
+    of the ``proposals`` table**, so a crop decision held in a local would
+    silently become "letterbox everything" on the following command.
+
+    A proposal with no recorded cells — every single-source treatment, and every
+    row written before M010/S05 — yields no crops at all, i.e. every cell
+    letterboxes, which is exactly the pre-slice behavior. A cell count that does
+    not match the source count is a stale or hand-edited row and is **rejected**,
+    never silently applied to the wrong cells. A value outside
+    :data:`~curator.artdirection.manifest.VALID_CROP_MODES` is rejected here so a
+    caller learns at manifest time, not at render time.
+    """
+    cells = proposal.evidence.get("cells")
+    if cells is None:
+        return {}
+    if isinstance(cells, (str, bytes)) or not isinstance(cells, Sequence):
+        raise ManifestError(
+            f"proposal evidence cells must be a list, got {type(cells).__name__}"
+        )
+    if len(cells) != len(sources_sha):
+        raise ManifestError(
+            f"proposal evidence has {len(cells)} cell(s) for "
+            f"{len(sources_sha)} source(s) — one cell per source is required"
+        )
+    crops: dict[str, str | None] = {}
+    for cell, sha in zip(cells, sources_sha, strict=True):
+        entry = cell if isinstance(cell, dict) else {}
+        value = entry.get("crop")
+        if value is None or value == "":
+            crops[str(entry.get("sha", sha))] = None
+            continue
+        if value not in VALID_CROP_MODES:
+            raise ManifestError(
+                f"unknown cell crop mode {value!r} — accepted values are "
+                f"{sorted(VALID_CROP_MODES)} or null (letterbox)"
+            )
+        crops[str(entry.get("sha", sha))] = str(value)
+    return crops
+
+
 def _packed_weights(
     results: list[AnalysisResult], request: ArtDirectionRequest
 ) -> tuple[list[float], str]:
@@ -540,8 +641,9 @@ def _packed_proposal(
     :func:`~curator.artdirection.packing.slice_cells` call
     :func:`materialize_manifest` will make from ``evidence["weights"]``, so the
     advertised geometry and the materialized regions agree by construction rather
-    than by convention — and each cell carries the weight that produced it, so a
-    human can check the rationale against the boxes.
+    than by convention — and each cell carries the weight that produced it, plus
+    its own :func:`_cell_fit` record (M010/S05), so a human can check the
+    rationale against the boxes.
     """
     shas = list(request.sources[: len(results)])
     weights, weight_source = _packed_weights(results, request)
@@ -552,6 +654,7 @@ def _packed_proposal(
         for sha, weight in zip(shas, weights, strict=True)
     ]
     cells = slice_cells(items, Cell(0, 0, target[0], target[1]), gap=gap)
+    fits = _cell_fits(results, cells)
     vertical = target[0] >= target[1]
     cut_axis = "vertical" if vertical else "horizontal"
     near, far = ("left", "right") if vertical else ("top", "bottom")
@@ -567,6 +670,7 @@ def _packed_proposal(
             f"root cut {cut_axis}, {split} cell(s) {near} / "
             f"{len(shas) - split} {far}, {gap}px gutter",
             f"mean group affinity {affinity:.2f} >= {NUP_AFFINITY}",
+            _fit_rationale(fits),
         ],
         score=round(affinity, 4),
         evidence={
@@ -588,19 +692,120 @@ def _packed_proposal(
                     "w": cell.w,
                     "h": cell.h,
                     "weight": weight,
+                    **fit,
                 }
-                for cell, weight in zip(cells, weights, strict=True)
+                for cell, weight, fit in zip(cells, weights, fits, strict=True)
             ],
         },
     )
 
 
 def _aspect(result: AnalysisResult) -> float | None:
-    """Return the composition aspect ratio (w / h) from ``saliency.map_size``."""
+    """Return the composition aspect ratio (w / h) from ``saliency.map_size``.
+
+    ``saliency.map_size`` doubles as the image aspect and is already computed and
+    stored, so a cell never has to rediscover its source's shape at placement
+    time. M010/S05 calls this **once per candidate** rather than only for
+    ``results[0]``: every cell's fit is decided from its own source.
+    """
     w, h = result.saliency.map_size
     if w <= 0 or h <= 0:
         return None
     return float(w) / float(h)
+
+
+def _crop_safety_gate(result: AnalysisResult) -> tuple[bool, float]:
+    """Return *result*'s ``(safe in all four directions, minimum margin)``.
+
+    The single expression behind both crop approvals in this module: whether a
+    whole frame may go SINGLE_FULLBLEED, and — from M010/S05 — whether one cell
+    of an N-up may crop to fill. Both call sites compare ``min_margin`` against
+    :data:`MIN_FULLBLEED_MARGIN` themselves; there is deliberately no second
+    threshold, because a per-cell crop is the same act as a full-bleed crop
+    performed on a smaller canvas.
+    """
+    safety = result.crop_safety
+    safe_all = (
+        safety.safe_north
+        and safety.safe_south
+        and safety.safe_east
+        and safety.safe_west
+    )
+    min_margin = min(
+        safety.margin_north,
+        safety.margin_south,
+        safety.margin_east,
+        safety.margin_west,
+    )
+    return safe_all, min_margin
+
+
+def _cell_fit(result: AnalysisResult, cell: SourceRegion) -> dict[str, Any]:
+    """Decide how one cell fits its own source, with the inputs that decided it.
+
+    A cell is marked :data:`~curator.artdirection.manifest.CROP_FILL` only when
+    **all three** hold for *its own* source (M010/S05):
+
+    1. ``crop_safety`` is safe in all four directions;
+    2. the minimum of the four margins is at least
+       :data:`MIN_FULLBLEED_MARGIN` — the same gate, and the same constant,
+       ``SINGLE_FULLBLEED`` uses for a whole frame;
+    3. the cell's aspect departs from the source's by more than
+       :data:`CELL_CROP_ASPECT_TOLERANCE`, so the crop actually buys canvas.
+
+    Otherwise the fit is ``None``: **letterbox is the default**, exactly as every
+    multi-region treatment has always behaved. A source with no usable
+    ``saliency.map_size`` has no aspect to compare and therefore letterboxes.
+
+    The returned record carries the verdict *and* its four inputs
+    (``source_aspect``, ``cell_aspect``, ``crop_safe``, ``min_margin``), so a
+    reader can check the decision rather than trust it.
+    """
+    crop_safe, min_margin = _crop_safety_gate(result)
+    source_aspect = _aspect(result)
+    cell_aspect = float(cell.w) / float(cell.h) if cell.h else None
+    crop: str | None = None
+    if (
+        crop_safe
+        and min_margin >= MIN_FULLBLEED_MARGIN
+        and source_aspect is not None
+        and cell_aspect is not None
+        and abs(cell_aspect - source_aspect) / source_aspect
+        > CELL_CROP_ASPECT_TOLERANCE
+    ):
+        crop = CROP_FILL
+    return {
+        "crop": crop,
+        "source_aspect": source_aspect,
+        "cell_aspect": cell_aspect,
+        "crop_safe": crop_safe,
+        "min_margin": min_margin,
+    }
+
+
+def _cell_fits(
+    results: Sequence[AnalysisResult], cells: Sequence[SourceRegion]
+) -> list[dict[str, Any]]:
+    """Zip *results* with *cells* into one :func:`_cell_fit` record each.
+
+    ``strict=True``: a result count that does not match the cell count is a
+    programming error in the caller, never a silently shortened layout.
+    """
+    return [
+        _cell_fit(result, cell)
+        for result, cell in zip(results, cells, strict=True)
+    ]
+
+
+def _fit_rationale(fits: Sequence[dict[str, Any]]) -> str:
+    """One human-checkable line naming how many cells fill, how many letterbox."""
+    filled = sum(1 for fit in fits if fit["crop"] == CROP_FILL)
+    return (
+        f"{filled} cell(s) crop-to-fill, {len(fits) - filled} letterbox — a cell "
+        f"fills only when its own source is crop-safe in all four directions "
+        f"with min margin >= {MIN_FULLBLEED_MARGIN} and its aspect differs from "
+        f"the cell's by more than {CELL_CROP_ASPECT_TOLERANCE:.0%}"
+    )
 
 
 def _pair_affinity(
@@ -678,12 +883,14 @@ def _nup_proposal(
     the materialized manifest's regions agree by construction rather than by
     convention. ``evidence["affinity_source"]`` names *which* affinity produced
     the score — the analysis pipeline's ``pairing.affinity``, never an embedding
-    cosine (M010/S04 emits a different literal for its own question).
+    cosine (M010/S04 emits a different literal for its own question). Each cell
+    also carries its own :func:`_cell_fit` record (M010/S05).
     """
     shas = list(request.sources[: len(results)])
     target = (request.target_width, request.target_height)
     gap = gutter_for_target(target)
     cells = equal_cells(shas, Cell(0, 0, target[0], target[1]), gap=gap)
+    fits = _cell_fits(results, cells)
     cut_axis = "vertical" if target[0] >= target[1] else "horizontal"
     pairwise = dict(
         zip(shas[1:], _pairwise_affinities(results, provider), strict=True)
@@ -694,6 +901,7 @@ def _nup_proposal(
             f"{len(shas)} sources, mean group affinity {affinity:.2f} >= {NUP_AFFINITY}",
             f"{len(shas)} equal cells on a {target[0]}x{target[1]} canvas, "
             f"{cut_axis} cut, {gap}px gutter",
+            _fit_rationale(fits),
         ],
         score=round(affinity, 4),
         evidence={
@@ -710,8 +918,9 @@ def _nup_proposal(
                     "y": cell.y,
                     "w": cell.w,
                     "h": cell.h,
+                    **fit,
                 }
-                for cell in cells
+                for cell, fit in zip(cells, fits, strict=True)
             ],
         },
     )

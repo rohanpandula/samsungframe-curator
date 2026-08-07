@@ -18,6 +18,7 @@ from analysis_factory import (
 )
 from curator.analysis.local import LocalAnalysisProvider
 from curator.artdirection.manifest import (
+    CROP_FILL,
     MANIFEST_VERSION,
     ArtDirectionManifest,
     LayoutTreatment,
@@ -26,7 +27,9 @@ from curator.artdirection.manifest import (
 from curator.artdirection.packing import Cell, equal_cells
 from curator.artdirection.policy import (
     _TREATMENT_RANK,
+    CELL_CROP_ASPECT_TOLERANCE,
     DIPTYCH_AFFINITY,
+    MIN_FULLBLEED_MARGIN,
     NUP_AFFINITY,
     PANORAMIC_MIN_ASPECT,
     SQUARE_ASPECT_MAX,
@@ -316,6 +319,8 @@ def test_nup_evidence_names_affinity_source_and_matches_manifest_cells() -> None
     assert all(cell["w"] > 0 and cell["h"] > 0 for cell in cells)
 
     manifest = materialize_manifest(tri, req, shas)
+    # Geometry only: M010/S05 added the per-cell fit record to the same entries,
+    # so the equality is asserted over the keys that describe the *box*.
     assert [
         {
             "sha": region.source_sha256,
@@ -325,7 +330,7 @@ def test_nup_evidence_names_affinity_source_and_matches_manifest_cells() -> None
             "h": region.h,
         }
         for region in manifest.regions
-    ] == cells
+    ] == [{k: cell[k] for k in ("sha", "x", "y", "w", "h")} for cell in cells]
     assert manifest.pairing_order == shas
     assert manifest.validate() is None
 
@@ -604,6 +609,257 @@ def test_a_proposal_without_weights_still_packs_uniformly() -> None:
 def test_packed_deterministic_repeats() -> None:
     shas = ["a", "b", "c", "d", "e"]
     results = _weighted_group(shas, 0.9, [0.91, 0.72, 0.70, 0.68, 0.51])
+    req = _request(shas)
+    first = propose_treatments(results, req)
+    second = propose_treatments(results, req)
+    assert [p.to_dict() for p in first] == [p.to_dict() for p in second]
+
+
+# ---------------------------------------------------------------------------
+# M010/S05: the per-cell fit decided from that cell's own crop safety + aspect
+# ---------------------------------------------------------------------------
+
+#: The two cells a two-source layout occupies on a 1920x1080 canvas — both
+#: 943x1080, i.e. aspect 0.873, against the 1.333 of the default fixture source.
+_PAIR_CELL_ASPECT = 943 / 1080
+
+
+def _packed_cells(results: list, shas: list[str]) -> list[dict]:
+    """Propose over *results* and return the PACKED proposal's evidence cells."""
+    packed = _first(
+        propose_treatments(results, _request(shas)), LayoutTreatment.PACKED
+    )
+    assert packed is not None
+    return packed.evidence["cells"]
+
+
+def test_a_crop_safe_source_in_a_differently_shaped_cell_fills_it() -> None:
+    """All three gates pass: safe everywhere, margin above the bar, aspect differs."""
+    shas = ["a", "b"]
+    cells = _packed_cells([crop_safe_result(s) for s in shas], shas)
+    assert [cell["crop"] for cell in cells] == [CROP_FILL, CROP_FILL]
+    assert cells[0]["crop_safe"] is True
+    assert cells[0]["min_margin"] >= MIN_FULLBLEED_MARGIN
+    # The verdict is checkable from the record: 1.333 vs 0.873 is a 34% departure.
+    relative = abs(cells[0]["cell_aspect"] - cells[0]["source_aspect"]) / cells[0][
+        "source_aspect"
+    ]
+    assert relative > CELL_CROP_ASPECT_TOLERANCE
+
+
+def test_one_unsafe_direction_letterboxes_that_cell_and_only_that_cell() -> None:
+    """The gate is per cell: a risky neighbour never blocks a safe source."""
+    shas = ["safe", "risky"]
+    results = [
+        crop_safe_result("safe"),
+        make_result("risky", safe_south=False),
+    ]
+    cells = _packed_cells(results, shas)
+    assert cells[0]["crop"] == CROP_FILL
+    assert cells[1]["crop"] is None
+    assert cells[1]["crop_safe"] is False
+    # It failed on safety alone — its margins are the same as the safe source's.
+    assert cells[1]["min_margin"] >= MIN_FULLBLEED_MARGIN
+
+
+def test_a_margin_below_the_fullbleed_bar_letterboxes_even_when_safe() -> None:
+    """The second gate, reusing SINGLE_FULLBLEED's constant rather than a new one."""
+    shas = ["a", "thin"]
+    results = [
+        crop_safe_result("a"),
+        make_result("thin", margin_south=MIN_FULLBLEED_MARGIN - 0.01),
+    ]
+    cells = _packed_cells(results, shas)
+    assert cells[1]["crop"] is None
+    assert cells[1]["crop_safe"] is True
+    assert cells[1]["min_margin"] < MIN_FULLBLEED_MARGIN
+
+
+def test_a_source_already_shaped_like_its_cell_letterboxes_despite_being_safe() -> None:
+    """Inside the tolerance a crop buys no canvas, so it is not taken."""
+    shas = ["a", "matched"]
+    results = [
+        crop_safe_result("a"),
+        make_result("matched", map_size=(943, 1080)),
+    ]
+    cells = _packed_cells(results, shas)
+    assert cells[1]["crop_safe"] is True
+    assert cells[1]["min_margin"] >= MIN_FULLBLEED_MARGIN
+    assert cells[1]["source_aspect"] == pytest.approx(_PAIR_CELL_ASPECT)
+    assert cells[1]["crop"] is None
+
+
+@pytest.mark.parametrize(
+    "treatment,count",
+    [
+        (LayoutTreatment.DIPTYCH, 2),
+        (LayoutTreatment.TRIPTYCH, 3),
+        (LayoutTreatment.QUAD, 4),
+        (LayoutTreatment.PACKED, 5),
+    ],
+)
+def test_every_multi_cell_treatment_records_the_four_fit_inputs(
+    treatment, count
+) -> None:
+    """Verdict plus inputs, on every multi-cell treatment — diptych included."""
+    shas = [f"s{i}" for i in range(count)]
+    proposals = propose_treatments(_group(shas, 0.95), _request(shas))
+    proposal = _first(proposals, treatment)
+    assert proposal is not None
+    cells = proposal.evidence["cells"]
+    assert len(cells) == count
+    for cell in cells:
+        assert set(cell) >= {
+            "sha",
+            "crop",
+            "source_aspect",
+            "cell_aspect",
+            "crop_safe",
+            "min_margin",
+        }
+        assert isinstance(cell["crop_safe"], bool)
+        assert isinstance(cell["min_margin"], float)
+        assert cell["source_aspect"] > 0
+        assert cell["cell_aspect"] > 0
+        assert cell["crop"] in (None, CROP_FILL)
+
+
+def test_per_candidate_aspects_are_read_per_source_not_echoed_from_the_first() -> None:
+    """Every candidate's own saliency.map_size, not results[0]'s, decides its cell."""
+    shas = ["wide", "square", "tall"]
+    results = [
+        make_result("wide", map_size=(4000, 1000)),
+        make_result("square", map_size=(1000, 1000)),
+        make_result("tall", map_size=(1000, 2000)),
+    ]
+    cells = _packed_cells(results, shas)
+    assert [cell["source_aspect"] for cell in cells] == [4.0, 1.0, 0.5]
+    # Cell aspects differ too, so a fit is a genuine per-cell comparison.
+    assert len({cell["cell_aspect"] for cell in cells}) > 1
+
+
+def test_a_source_with_no_usable_map_size_letterboxes() -> None:
+    """No aspect to compare means no crop — never a crop taken on a guess."""
+    shas = ["a", "unknown"]
+    results = [crop_safe_result("a"), make_result("unknown", map_size=(0, 0))]
+    cells = _packed_cells(results, shas)
+    assert cells[1]["source_aspect"] is None
+    assert cells[1]["crop"] is None
+
+
+def test_the_fit_rationale_counts_the_two_kinds_of_cell() -> None:
+    """One human-checkable line, agreeing with the machine record beside it."""
+    shas = ["safe", "risky"]
+    results = [crop_safe_result("safe"), crop_risky_result("risky")]
+    packed = _first(
+        propose_treatments(results, _request(shas)), LayoutTreatment.PACKED
+    )
+    assert packed is not None
+    line = next(r for r in packed.rationale if "crop-to-fill" in r)
+    assert line.startswith("1 cell(s) crop-to-fill, 1 letterbox")
+    assert f"min margin >= {MIN_FULLBLEED_MARGIN}" in line
+    assert "10%" in line
+    crops = [cell["crop"] for cell in packed.evidence["cells"]]
+    assert crops.count(CROP_FILL) == 1
+
+
+def test_materialize_propagates_each_cells_crop_onto_its_own_region() -> None:
+    """The decision survives propose -> evidence -> manifest, per source."""
+    shas = ["safe", "risky"]
+    req = _request(shas)
+    results = [crop_safe_result("safe"), crop_risky_result("risky")]
+    packed = _first(propose_treatments(results, req), LayoutTreatment.PACKED)
+    assert packed is not None
+    manifest = materialize_manifest(packed, req, shas)
+    assert {r.source_sha256: r.crop for r in manifest.regions} == {
+        "safe": CROP_FILL,
+        "risky": None,
+    }
+    assert manifest.validate() is None
+
+
+def test_the_crop_decision_survives_the_proposal_json_round_trip() -> None:
+    """cli._manifest re-materializes from a *reloaded* row, exactly as for weights."""
+    shas = ["safe", "risky"]
+    req = _request(shas)
+    results = [crop_safe_result("safe"), crop_risky_result("risky")]
+    packed = _first(propose_treatments(results, req), LayoutTreatment.PACKED)
+    assert packed is not None
+    reloaded = TreatmentProposal.from_dict(json.loads(json.dumps(packed.to_dict())))
+    assert reloaded == packed
+    assert [r.crop for r in materialize_manifest(reloaded, req, shas).regions] == [
+        CROP_FILL,
+        None,
+    ]
+
+
+def test_a_reordered_source_list_moves_each_verdict_with_its_own_source() -> None:
+    """Crops are keyed by sha, so a verdict can never land on a neighbour's cell."""
+    shas = ["safe", "risky"]
+    req = _request(shas)
+    results = [crop_safe_result("safe"), crop_risky_result("risky")]
+    packed = _first(propose_treatments(results, req), LayoutTreatment.PACKED)
+    assert packed is not None
+    manifest = materialize_manifest(packed, req, ["risky", "safe"])
+    assert {r.source_sha256: r.crop for r in manifest.regions} == {
+        "safe": CROP_FILL,
+        "risky": None,
+    }
+
+
+def test_materialize_rejects_an_out_of_vocabulary_crop() -> None:
+    """A hand-edited proposals row cannot smuggle an unknown fit into a manifest."""
+    prop = TreatmentProposal(
+        treatment=LayoutTreatment.PACKED,
+        score=0.9,
+        evidence={"cells": [{"sha": "a", "crop": "center"}, {"sha": "b"}]},
+    )
+    with pytest.raises(ManifestError) as excinfo:
+        materialize_manifest(prop, _request(["a", "b"]), ["a", "b"])
+    message = str(excinfo.value)
+    assert "center" in message
+    assert "fill" in message
+
+
+def test_materialize_rejects_cells_that_do_not_match_the_sources() -> None:
+    """A stale row is rejected rather than applied to whichever cells line up."""
+    prop = TreatmentProposal(
+        treatment=LayoutTreatment.PACKED,
+        score=0.9,
+        evidence={"weights": [1.0, 1.0, 1.0], "cells": [{"sha": "a"}, {"sha": "b"}]},
+    )
+    with pytest.raises(ManifestError) as excinfo:
+        materialize_manifest(prop, _request(["a", "b", "c"]), ["a", "b", "c"])
+    assert "one cell per source" in str(excinfo.value)
+
+
+def test_a_pre_s05_proposal_letterboxes_every_cell() -> None:
+    """Every row written before this slice keeps rendering exactly as it did."""
+    shas = ["a", "b", "c"]
+    prop = TreatmentProposal(treatment=LayoutTreatment.PACKED, score=0.9)
+    manifest = materialize_manifest(prop, _request(shas), shas)
+    assert [r.crop for r in manifest.regions] == [None, None, None]
+
+
+def test_a_single_source_treatment_never_carries_a_crop() -> None:
+    """CONTAIN_MATTE and friends record no cells, so they record no fit."""
+    req = _request(["only"])
+    prop = _first(
+        propose_treatments(crop_risky_result("only"), req),
+        LayoutTreatment.CONTAIN_MATTE,
+    )
+    assert prop is not None
+    assert [r.crop for r in materialize_manifest(prop, req, ["only"]).regions] == [None]
+
+
+def test_the_fit_decision_is_deterministic() -> None:
+    shas = ["a", "b", "c", "d"]
+    results = [
+        crop_safe_result("a"),
+        crop_risky_result("b"),
+        make_result("c", map_size=(943, 1080)),
+        make_result("d", margin_north=0.01),
+    ]
     req = _request(shas)
     first = propose_treatments(results, req)
     second = propose_treatments(results, req)

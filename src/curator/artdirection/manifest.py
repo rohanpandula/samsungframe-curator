@@ -95,6 +95,24 @@ _TREATMENT_SOURCE_COUNT: dict[LayoutTreatment, int] = {
     LayoutTreatment.QUAD: 4,
 }
 
+#: The one crop mode: scale to fill the cell and center-crop the overflow (M010/S05).
+#:
+#: Renders through ``renderer._center_crop_fill`` — the codebase's single crop,
+#: already used by ``SINGLE_FULLBLEED`` — never a second cropping heuristic.
+CROP_FILL = "fill"
+
+#: The accepted vocabulary for :attr:`SourceRegion.crop` (M010/S05).
+#:
+#: ``None`` (and the empty string) mean **letterbox**: fit the source inside its
+#: cell preserving aspect and pad the remainder with the manifest background.
+#: That is the default every multi-region treatment has always used and the only
+#: fit any manifest written before M010/S05 can carry. Anything outside this
+#: frozenset is rejected by ``policy.materialize_manifest`` (:class:`ManifestError`)
+#: and by ``renderer._multi_cell`` (``RenderError``) — an unrecognized fit
+#: directive is never silently downgraded to a letterbox, because silently
+#: discarding a caller's stated intent is the failure mode M010 exists to remove.
+VALID_CROP_MODES: frozenset[str] = frozenset({CROP_FILL})
+
 
 @dataclass(frozen=True)
 class SourceRegion:
@@ -112,6 +130,13 @@ class SourceRegion:
     geometry declared*, never "a zero-sized cell"; see :attr:`is_unset`. Every
     manifest persisted before M010 carries all-zero regions, so this reading is
     what keeps that history valid.
+
+    ``crop`` is this cell's **fit** — how the source is placed inside the
+    geometry, as opposed to what the geometry is. Its vocabulary is
+    :data:`VALID_CROP_MODES`, with ``None``/``""`` meaning letterbox (M010/S05).
+    The field has existed since M002; M010/S05 gives it its first production
+    writer (``policy.materialize_manifest``) and its first production reader
+    (``renderer._multi_cell``), rather than adding a parallel one.
     """
 
     source_sha256: str
