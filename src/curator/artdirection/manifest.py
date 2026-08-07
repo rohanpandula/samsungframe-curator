@@ -244,7 +244,11 @@ class ArtDirectionManifest:
         ``packing.resolve_regions`` re-derives geometry it finds already stored;
         an unvalidated negative width/height reaches the renderer's crop-fill
         path as a bare ``ValueError`` (a zero extent mis-renders silently
-        instead). Unknown *override* fields are rejected later by
+        instead). ``sources`` itself must carry no duplicate sha (WR-02): a
+        repeated sha would otherwise let ``packing.resolve_regions``'s
+        ``{sha: region}`` dict comprehension silently keep only the *last* of
+        two distinct authored regions, with no error and no indication which one
+        was dropped. Unknown *override* fields are rejected later by
         :meth:`resolved_for`.
         """
         if str(self.manifest_version) != MANIFEST_VERSION:
@@ -264,6 +268,8 @@ class ArtDirectionManifest:
                 f"{MAX_LAYOUT_SOURCES}-source layout cap — an over-cap request is "
                 f"rejected, never truncated"
             )
+        if len(set(self.sources)) != len(self.sources):
+            raise ManifestError("manifest sources contains duplicate sha256 entries")
         if self.regions:
             if len(self.regions) != len(self.sources):
                 raise ManifestError(

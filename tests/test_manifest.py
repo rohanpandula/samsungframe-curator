@@ -218,6 +218,21 @@ def test_positive_regions_still_validate() -> None:
     m.validate()
 
 
+def test_duplicate_source_shas_raise() -> None:
+    """WR-02: a manifest carrying the same sha twice is rejected outright,
+    instead of letting ``resolve_regions``'s ``{sha: region}`` comprehension
+    silently keep only the last of two distinct authored regions for it."""
+    m = ArtDirectionManifest(sources=["a", "a", "b"])
+    with pytest.raises(ManifestError) as exc:
+        m.validate()
+    assert "duplicate" in str(exc.value)
+
+
+def test_no_duplicate_source_shas_still_validates() -> None:
+    """The unique-sources case is unaffected by the new check."""
+    ArtDirectionManifest(sources=["a", "b", "c"]).validate()
+
+
 def test_is_unset_distinguishes_declared_geometry() -> None:
     """All-zero means 'no geometry declared'; any non-zero extent means set."""
     assert SourceRegion(source_sha256="a").is_unset is True
