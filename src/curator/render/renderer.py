@@ -15,14 +15,16 @@ Treatments implemented here:
   letterbox with the manifest background, with an optional matte border.
 - ``PANORAMIC`` — fit a wide source, centered, with neutral sides.
 - ``SQUARE`` — center a square canvas (side = min dimension) with balanced matte.
-- ``DIPTYCH`` / ``TRIPTYCH`` / ``QUAD`` — every
+- ``DIPTYCH`` / ``TRIPTYCH`` / ``QUAD`` / ``PACKED`` — every
   :data:`~curator.artdirection.manifest.MULTI_CELL_TREATMENTS` member renders
   through one region-iterating loop (:func:`_multi_cell`, M010/S02): the
   manifest's cells are resolved for the target by
   :func:`~curator.artdirection.packing.resolve_regions` and each source is
   letterbox-fit into its own cell, separated by a thin deterministic gutter. A
   manifest whose source count does not match its named template is **rejected**,
-  never truncated.
+  never truncated; ``PACKED`` (M010/S03) has no fixed count and needed no new
+  branch here — only the 2..:data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES`
+  bound every treatment gets.
 
 Upscaling a source region relative to the target is never silent: it is blocked
 (``RenderError``) unless ``processing_intent.upscale_warning`` explicitly
@@ -42,6 +44,7 @@ from PIL.ImageColor import getrgb
 
 from curator.artdirection.manifest import (
     _TREATMENT_SOURCE_COUNT,
+    MAX_LAYOUT_SOURCES,
     MULTI_CELL_TREATMENTS,
     ArtDirectionManifest,
     BackgroundSpec,
@@ -310,14 +313,25 @@ def _multi_cell(
     **Reject, never truncate.** A treatment with an entry in
     :data:`~curator.artdirection.manifest._TREATMENT_SOURCE_COUNT` must be handed
     exactly that many sources; an over-count used to render silently, dropping
-    every source past the second. Returns the composed canvas plus
-    ``any(per-cell upscaled)`` — the whole-manifest generalization of the old
-    ``up_a or up_b``, which the caller's R008 gate then approves or blocks once.
+    every source past the second. A treatment with **no** entry has a variable
+    source count by design (M010/S03's ``PACKED``) and is bounded on both sides
+    instead: at least two cells, at most
+    :data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES`. Returns the
+    composed canvas plus ``any(per-cell upscaled)`` — the whole-manifest
+    generalization of the old ``up_a or up_b``, which the caller's R008 gate then
+    approves or blocks once.
     """
     order = manifest.pairing_order or list(manifest.sources)
     treatment = manifest.layout_treatment
     required = _TREATMENT_SOURCE_COUNT.get(treatment)
-    if required is not None and len(order) != required:
+    if required is None:
+        if not 2 <= len(order) <= MAX_LAYOUT_SOURCES:
+            raise RenderError(
+                f"{treatment.value} lays out 2 to {MAX_LAYOUT_SOURCES} sources, "
+                f"got {len(order)} — an out-of-bounds request is rejected, never "
+                f"truncated"
+            )
+    elif len(order) != required:
         if len(order) < required:
             raise RenderError(
                 f"{treatment.value} requires at least "

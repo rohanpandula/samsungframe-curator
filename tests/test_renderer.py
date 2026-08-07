@@ -12,6 +12,7 @@ from curator.artdirection.manifest import (
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
+    ManifestError,
     ProcessingIntent,
 )
 from curator.hashing import sha256_hex
@@ -552,3 +553,87 @@ def test_diptych_bytes_identical_to_pre_m010_box_math() -> None:
         _paste_panel(canvas, _open_rgb(dat_a)[0], box_a)
         _paste_panel(canvas, _open_rgb(dat_b)[0], box_b)
         assert _encode_png(canvas) == renderer.render_bytes(m, src, target)
+
+
+# -- M010/S03: PACKED, the variable-count treatment ---------------------------
+
+PACKED_COLORS = [
+    (200, 40, 40),
+    (40, 200, 40),
+    (40, 40, 200),
+    (200, 200, 40),
+    (40, 200, 200),
+    (200, 40, 200),
+    (120, 120, 120),
+    (240, 160, 40),
+    (80, 40, 160),
+]
+
+
+def _packed_sources(count: int, width: int = 1600, height: int = 1200):
+    """Return ({sha: bytes}, [sha...]) for up to nine distinctly-colored sources."""
+    data: dict[str, bytes] = {}
+    order: list[str] = []
+    for index in range(count):
+        sha, payload = make_source(width, height, color=PACKED_COLORS[index])
+        data[sha] = payload
+        order.append(sha)
+    return data, order
+
+
+@pytest.mark.parametrize("count", [2, 5, 9])
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+def test_packed_renders_exact_target_dims_for_any_n(count: int, target) -> None:
+    """PACKED needed no render branch — only a MULTI_CELL_TREATMENTS member."""
+    src, order = _packed_sources(count)
+    m = _nup_manifest(LayoutTreatment.PACKED, order, upscale_warning=True)
+    r = renderer.render(m, src, target)
+    assert (r.target_width, r.target_height) == target
+    assert r.treatment == "packed"
+    assert r.sources == order
+    assert open_rgb(renderer.render_bytes(m, src, target)).size == target
+
+
+def test_packed_paints_every_cell_at_five_sources() -> None:
+    from curator.artdirection.packing import Cell, gutter_for_target, resolve_regions
+
+    src, order = _packed_sources(5)
+    m = _nup_manifest(LayoutTreatment.PACKED, order)
+    img = open_rgb(renderer.render_bytes(m, src, (1920, 1080)))
+    assert Cell(0, 0, 1920, 1080).w == 1920  # the packer's own box, for clarity
+    assert gutter_for_target((1920, 1080)) == 33
+    for index, cell in enumerate(resolve_regions(m, (1920, 1080))):
+        center = (int(cell.x + cell.w // 2), int(cell.y + cell.h // 2))
+        assert img.getpixel(center) == PACKED_COLORS[index]
+
+
+def test_packed_with_one_source_is_rejected() -> None:
+    """A countless treatment is still bounded on both sides, never truncated."""
+    src, order = _packed_sources(1)
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(_nup_manifest(LayoutTreatment.PACKED, order), src, (1920, 1080))
+    message = str(excinfo.value)
+    assert "lays out 2 to 9 sources" in message
+    assert "got 1" in message
+
+
+def test_packed_over_the_cap_is_rejected_before_any_decode() -> None:
+    """The cap fires in validate(), _render's first statement — zero Pillow work.
+
+    Deliberately a ``ManifestError`` and not the ``_multi_cell`` bound: the
+    earliest gate is the one that must catch an over-cap N, which is why the
+    tenth sha here has no bytes in *src* at all (a missing-source ``RenderError``
+    would prove the check ran too late).
+    """
+    src, order = _packed_sources(9)
+    order = order + ["deadbeef"]
+    m = ArtDirectionManifest(
+        sources=order,
+        layout_treatment=LayoutTreatment.PACKED,
+        pairing_order=order,
+    )
+    with pytest.raises(ManifestError) as excinfo:
+        renderer.render(m, src, (1920, 1080))
+    message = str(excinfo.value)
+    assert "10 source(s)" in message
+    assert "never truncated" in message

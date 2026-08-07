@@ -1,12 +1,20 @@
-"""Deterministic art-direction policy engine (M002/S03 T2+T3, M010/S02).
+"""Deterministic art-direction policy engine (M002/S03 T2+T3, M010/S02, S03).
 
 Given one or more :class:`~curator.analysis.schema.AnalysisResult` fixtures and
 an :class:`ArtDirectionRequest`, :func:`propose_treatments` ranks which
 :class:`~curator.artdirection.manifest.LayoutTreatment` choices are applicable
 and returns them as ``TreatmentProposal`` objects ordered by score descending.
 Single-source treatments read the primary result; the multi-source ones —
-DIPTYCH at two sources, TRIPTYCH at three and QUAD at four (M010/S02) — are
-gated on a cross-image affinity and carry their cell geometry as evidence.
+DIPTYCH at two sources, TRIPTYCH at three and QUAD at four (M010/S02), plus
+PACKED at any count up to
+:data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES` (M010/S03) — are gated
+on a cross-image affinity and carry their cell geometry as evidence.
+
+PACKED's cells are sized by an importance **weight** per source, defaulting to
+``quality.aesthetic_quality`` and overridable through ``request.context["weights"]``
+(``curator propose --weights``). The weights are recorded in ``evidence`` — not
+kept in a local — because that is the only way they survive the proposals-table
+round trip into :func:`materialize_manifest`.
 
 The policy is a pure, deterministic rules engine: identical analysis + request
 always yield an identical, identically-ordered list of proposals. It consumes
@@ -21,6 +29,8 @@ chosen proposal.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -35,7 +45,14 @@ from curator.artdirection.manifest import (
     LayoutTreatment,
     ManifestError,
 )
-from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
+from curator.artdirection.packing import (
+    Cell,
+    WeightedSource,
+    _bisect_by_weight,
+    equal_cells,
+    gutter_for_target,
+    slice_cells,
+)
 
 if TYPE_CHECKING:
     from curator.analysis.local import LocalAnalysisProvider
@@ -83,10 +100,14 @@ _TREATMENT_RANK = {
     LayoutTreatment.DIPTYCH: 0,
     LayoutTreatment.TRIPTYCH: 1,
     LayoutTreatment.QUAD: 2,
-    LayoutTreatment.SINGLE_FULLBLEED: 3,
-    LayoutTreatment.CONTAIN_MATTE: 4,
-    LayoutTreatment.PANORAMIC: 5,
-    LayoutTreatment.SQUARE: 6,
+    # PACKED scores exactly what the named template at the same N scores, so this
+    # rank is what puts TRIPTYCH/QUAD first at N=3/N=4 (a template wins at its
+    # own N) while PACKED covers N=5..MAX_LAYOUT_SOURCES on its own (M010/S03).
+    LayoutTreatment.PACKED: 3,
+    LayoutTreatment.SINGLE_FULLBLEED: 4,
+    LayoutTreatment.CONTAIN_MATTE: 5,
+    LayoutTreatment.PANORAMIC: 6,
+    LayoutTreatment.SQUARE: 7,
 }
 
 # Completeness guard (M010/S02): a LayoutTreatment with no _TREATMENT_RANK entry
@@ -182,6 +203,11 @@ def propose_treatments(
     that have both an analysis result *and* a request entry: ``n == 2`` may yield
     a DIPTYCH, ``n == 3`` a TRIPTYCH and ``n == 4`` a QUAD. Extra results beyond
     the request's sources are never silently laid out.
+
+    M010/S03 adds PACKED for **any** ``n`` in ``2..MAX_LAYOUT_SOURCES`` over the
+    same ``NUP_AFFINITY`` gate, with the same score as the named template at that
+    ``n`` — so ``_TREATMENT_RANK`` keeps a template ahead of PACKED at its own
+    ``n``, and PACKED is the only multi-cell proposal from ``n == 5`` up.
     """
     results = [analysis] if isinstance(analysis, AnalysisResult) else list(analysis)
     if not results:
@@ -307,13 +333,23 @@ def propose_treatments(
                 )
             )
 
-    nup_treatment = _NUP_TREATMENTS.get(n)
-    if nup_treatment is not None:
+    # One affinity computation serves both the named template (when there is one
+    # at this N) and PACKED, which covers every N in 2..MAX_LAYOUT_SOURCES
+    # (M010/S03) — including the N=3/N=4 where a template also applies, so
+    # `--treatment packed` is selectable at any N.
+    if 2 <= n <= MAX_LAYOUT_SOURCES:
         group = results[:n]
         group_affinity = _group_affinity(group, provider)
         if group_affinity >= NUP_AFFINITY:
+            nup_treatment = _NUP_TREATMENTS.get(n)
+            if nup_treatment is not None:
+                proposals.append(
+                    _nup_proposal(
+                        nup_treatment, group, request, provider, group_affinity
+                    )
+                )
             proposals.append(
-                _nup_proposal(nup_treatment, group, request, provider, group_affinity)
+                _packed_proposal(group, request, provider, group_affinity)
             )
 
     proposals.sort(key=lambda p: (-p.score, _TREATMENT_RANK[p.treatment]))
@@ -361,10 +397,14 @@ def materialize_manifest(
     manifest's :class:`BackgroundSpec`.
 
     The pack target is ``request.target_width`` / ``request.target_height``, so
-    the signature is deliberately unchanged: 01-PATTERNS.md sketched extra
-    ``target`` / ``weights`` parameters, which are unnecessary here because the
-    request already carries the dims and S01 packs at equal weight. M010/S03,
-    which adds a real weights path, is where that sketch becomes relevant.
+    the signature is deliberately unchanged, even now that M010/S03 packs by
+    weight: the weights are read from ``proposal.evidence["weights"]``, not from
+    a new parameter. That is load-bearing rather than stylistic — ``cli._manifest``
+    re-materializes from a proposal **reloaded out of the ``proposals`` table**,
+    so a weight passed as an argument by ``curator propose`` would silently
+    become uniform on the following ``curator manifest``. A proposal with no
+    stored weights (every single-source treatment, and every pre-S03 row) packs
+    uniformly, which is exactly S01's behavior.
 
     Raises :class:`~curator.artdirection.manifest.ManifestError` when more than
     :data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES` sources are given,
@@ -395,8 +435,13 @@ def materialize_manifest(
             background_choice=str(choice) if choice is not None else "none"
         )
     target = (request.target_width, request.target_height)
-    regions = equal_cells(
-        pairing_order or sources_sha,
+    order = pairing_order or list(sources_sha)
+    weights = _manifest_weights(proposal, sources_sha)
+    regions = slice_cells(
+        [
+            WeightedSource(sha, weight)
+            for sha, weight in zip(order, weights, strict=True)
+        ],
         Cell(0, 0, request.target_width, request.target_height),
         gap=gutter_for_target(target),
     )
@@ -408,6 +453,145 @@ def materialize_manifest(
         background=background,
         pairing_order=pairing_order,
         rationale=reasons,
+    )
+
+
+def _coerce_weights(value: Any, count: int, *, origin: str) -> list[float]:
+    """Return *value* as exactly *count* floats, or raise :class:`ManifestError`.
+
+    The one validator for both weight trust boundaries (M010/S03): a caller's
+    ``request.context["weights"]`` and a persisted proposal's
+    ``evidence["weights"]`` reloaded out of SQLite. *origin* names which one, so
+    the message is actionable at the surface the caller actually used. Rejecting
+    a length mismatch here is what stops a hand-edited or stale row from packing
+    N sources against M weights.
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise ManifestError(
+            f"{origin} must be a list of {count} number(s), got {type(value).__name__}"
+        )
+    if len(value) != count:
+        raise ManifestError(
+            f"{origin} has {len(value)} weight(s) for {count} source(s) — one "
+            f"weight per source is required"
+        )
+    weights: list[float] = []
+    for item in value:
+        try:
+            weights.append(float(item))
+        except (TypeError, ValueError):
+            raise ManifestError(
+                f"{origin} value is not a number: {item!r}"
+            ) from None
+    return weights
+
+
+def _manifest_weights(
+    proposal: TreatmentProposal, sources_sha: list[str]
+) -> list[float]:
+    """Return the per-source weights *proposal* was packed with (M010/S03).
+
+    Read back from ``evidence["weights"]`` so a manifest materialized from a
+    reloaded proposal reproduces the proposal's own geometry exactly. A proposal
+    that never recorded weights (every single-source treatment, every pre-S03
+    row) packs uniformly.
+    """
+    stored = proposal.evidence.get("weights")
+    if stored is None:
+        return [1.0] * len(sources_sha)
+    return _coerce_weights(stored, len(sources_sha), origin="proposal evidence")
+
+
+def _packed_weights(
+    results: list[AnalysisResult], request: ArtDirectionRequest
+) -> tuple[list[float], str]:
+    """Return the packing weights for *results* plus the literal naming their source.
+
+    The locked default is each source's ``quality.aesthetic_quality`` — an
+    explicit, inspectable signal rather than an inferred one, matching this
+    repo's "providers propose, policy decides" posture. A caller may override it
+    per request through ``context["weights"]`` (validated to one float per
+    source). Either way the provenance is recorded, and a vector that would
+    degenerate to uniform inside the packer reports ``"uniform_fallback"`` rather
+    than claiming a provenance the geometry did not actually use — the predicate
+    below is the same one ``packing._usable_weights`` applies.
+    """
+    override = request.context.get("weights")
+    if override is None:
+        weights = [float(r.quality.aesthetic_quality) for r in results]
+        source = "quality.aesthetic_quality"
+    else:
+        weights = _coerce_weights(override, len(results), origin="weights override")
+        source = "caller_override"
+    if sum(w for w in weights if math.isfinite(w) and w > 0.0) <= 0.0:
+        return [1.0] * len(results), "uniform_fallback"
+    return weights, source
+
+
+def _packed_proposal(
+    results: list[AnalysisResult],
+    request: ArtDirectionRequest,
+    provider: Any | None,
+    affinity: float,
+) -> TreatmentProposal:
+    """Build the PACKED proposal for *results* under *request* (M010/S03).
+
+    ``evidence["cells"]`` comes from the *same*
+    :func:`~curator.artdirection.packing.slice_cells` call
+    :func:`materialize_manifest` will make from ``evidence["weights"]``, so the
+    advertised geometry and the materialized regions agree by construction rather
+    than by convention — and each cell carries the weight that produced it, so a
+    human can check the rationale against the boxes.
+    """
+    shas = list(request.sources[: len(results)])
+    weights, weight_source = _packed_weights(results, request)
+    target = (request.target_width, request.target_height)
+    gap = gutter_for_target(target)
+    items = [
+        WeightedSource(sha, weight)
+        for sha, weight in zip(shas, weights, strict=True)
+    ]
+    cells = slice_cells(items, Cell(0, 0, target[0], target[1]), gap=gap)
+    vertical = target[0] >= target[1]
+    cut_axis = "vertical" if vertical else "horizontal"
+    near, far = ("left", "right") if vertical else ("top", "bottom")
+    split = _bisect_by_weight(items)
+    pairwise = dict(
+        zip(shas[1:], _pairwise_affinities(results, provider), strict=True)
+    )
+    return TreatmentProposal(
+        treatment=LayoutTreatment.PACKED,
+        rationale=[
+            f"{len(shas)} cells packed by importance "
+            f"(weights {'/'.join(f'{w:.2f}' for w in weights)})",
+            f"root cut {cut_axis}, {split} cell(s) {near} / "
+            f"{len(shas) - split} {far}, {gap}px gutter",
+            f"mean group affinity {affinity:.2f} >= {NUP_AFFINITY}",
+        ],
+        score=round(affinity, 4),
+        evidence={
+            "sources": len(shas),
+            "group_affinity": affinity,
+            "affinity_source": "pairing.affinity",
+            "pairwise_affinity": pairwise,
+            "weights": weights,
+            "weight_source": weight_source,
+            "gap": gap,
+            # The *root* cut only; deeper cuts alternate by box aspect and are
+            # readable from the cell geometry below.
+            "cut_axis": cut_axis,
+            "cells": [
+                {
+                    "sha": cell.source_sha256,
+                    "x": cell.x,
+                    "y": cell.y,
+                    "w": cell.w,
+                    "h": cell.h,
+                    "weight": weight,
+                }
+                for cell, weight in zip(cells, weights, strict=True)
+            ],
+        },
     )
 
 

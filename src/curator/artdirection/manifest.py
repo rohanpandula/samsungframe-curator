@@ -46,6 +46,10 @@ class LayoutTreatment(Enum):
     DIPTYCH = "diptych"
     TRIPTYCH = "triptych"
     QUAD = "quad"
+    #: Arbitrary N within :data:`MAX_LAYOUT_SOURCES`, packed by weight (M010/S03).
+    #: Deliberately absent from :data:`_TREATMENT_SOURCE_COUNT` — a variable
+    #: source count is the whole point of it.
+    PACKED = "packed"
 
 
 _NESTED_DICT_FIELDS = {"background", "processing_intent"}
@@ -66,9 +70,15 @@ MAX_LAYOUT_SOURCES = 9
 #: The single place the "does this treatment need more than one cell?" question
 #: is answered — read by ``policy.materialize_manifest`` (which cell order to
 #: record) and by ``renderer._render`` (which branch renders it). M010/S02 added
-#: the two named N-up templates; M010/S03 extends the set again with ``PACKED``.
+#: the two named N-up templates; M010/S03 added ``PACKED``, which needed no new
+#: render branch — only a set member.
 MULTI_CELL_TREATMENTS: frozenset[LayoutTreatment] = frozenset(
-    {LayoutTreatment.DIPTYCH, LayoutTreatment.TRIPTYCH, LayoutTreatment.QUAD}
+    {
+        LayoutTreatment.DIPTYCH,
+        LayoutTreatment.TRIPTYCH,
+        LayoutTreatment.QUAD,
+        LayoutTreatment.PACKED,
+    }
 )
 
 #: How many sources each fixed-size named template requires, exactly (M010/S02).

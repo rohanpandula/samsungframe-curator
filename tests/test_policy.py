@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 from PIL import Image
@@ -9,6 +11,7 @@ from PIL import Image
 from analysis_factory import (
     crop_risky_result,
     crop_safe_result,
+    make_result,
     paired_result,
     square_result,
     wide_result,
@@ -20,6 +23,7 @@ from curator.artdirection.manifest import (
     LayoutTreatment,
     ManifestError,
 )
+from curator.artdirection.packing import Cell, equal_cells
 from curator.artdirection.policy import (
     _TREATMENT_RANK,
     DIPTYCH_AFFINITY,
@@ -42,6 +46,7 @@ def _request(
     width: int = 1920,
     height: int = 1080,
     target: str = "1080p",
+    context: dict | None = None,
 ) -> ArtDirectionRequest:
     return ArtDirectionRequest(
         target=target,
@@ -49,6 +54,7 @@ def _request(
         target_height=height,
         sources=source_shas,
         allow_diptych=allow_diptych,
+        context=dict(context) if context else {},
     )
 
 
@@ -355,6 +361,249 @@ def test_nup_deterministic_repeats() -> None:
     """Identical N-up input yields an identical, identically-ordered result."""
     shas = ["a", "b", "c", "d"]
     results = _group(shas, 0.85)
+    req = _request(shas)
+    first = propose_treatments(results, req)
+    second = propose_treatments(results, req)
+    assert [p.to_dict() for p in first] == [p.to_dict() for p in second]
+
+
+# ---------------------------------------------------------------------------
+# M010/S03: PACKED — arbitrary N within the cap, sized by weight
+# ---------------------------------------------------------------------------
+
+
+def _weighted_group(shas: list[str], affinity: float, weights: list[float]) -> list:
+    """One AnalysisResult per sha, carrying *affinity* and its own aesthetic."""
+    return [
+        make_result(sha, aesthetic_quality=weight, affinity=affinity)
+        for sha, weight in zip(shas, weights, strict=True)
+    ]
+
+
+def _geometry(cells: list[dict]) -> list[tuple]:
+    return [(c["sha"], c["x"], c["y"], c["w"], c["h"]) for c in cells]
+
+
+def _regions(manifest: ArtDirectionManifest) -> list[tuple]:
+    return [(r.source_sha256, r.x, r.y, r.w, r.h) for r in manifest.regions]
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_packed_is_proposed_for_every_n_within_the_cap(count: int) -> None:
+    """The point of S03: arbitrary N is reachable, not just the named templates."""
+    shas = [f"s{i}" for i in range(count)]
+    proposals = propose_treatments(_group(shas, 0.95), _request(shas))
+    packed = _first(proposals, LayoutTreatment.PACKED)
+    assert packed is not None
+    assert packed.score == 0.95
+    assert packed.evidence["sources"] == count
+    assert len(packed.evidence["cells"]) == count
+    assert len(packed.evidence["weights"]) == count
+
+
+def test_packed_is_the_top_layoutable_proposal_at_five_sources() -> None:
+    """From N=5 up, PACKED is the only proposal that can lay five sources out.
+
+    DIPTYCH still ranks first *by score* here — its block is gated on
+    ``>= 2`` sources, and ``cli._lays_out`` (D033) is what skips a template that
+    cannot lay out this many. PACKED leads every proposal that can.
+    """
+    shas = ["a", "b", "c", "d", "e"]
+    proposals = propose_treatments(_group(shas, 0.95), _request(shas))
+    layoutable = [p for p in proposals if p.treatment is not LayoutTreatment.DIPTYCH]
+    assert layoutable[0].treatment is LayoutTreatment.PACKED
+    assert _first(proposals, LayoutTreatment.TRIPTYCH) is None
+    assert _first(proposals, LayoutTreatment.QUAD) is None
+
+
+def test_packed_is_not_proposed_over_the_cap() -> None:
+    """Ten sources are rejected upstream; the policy proposes no layout for them."""
+    shas = [f"s{i}" for i in range(10)]
+    proposals = propose_treatments(_group(shas, 0.95), _request(shas))
+    assert _first(proposals, LayoutTreatment.PACKED) is None
+
+
+def test_packed_not_proposed_below_the_affinity_threshold() -> None:
+    shas = ["a", "b", "c", "d", "e"]
+    proposals = propose_treatments(
+        _group(shas, NUP_AFFINITY - 0.2), _request(shas)
+    )
+    assert _first(proposals, LayoutTreatment.PACKED) is None
+
+
+def test_triptych_outranks_packed_at_three_sources_on_an_equal_score() -> None:
+    """A named template wins at its own N; the tie is broken by _TREATMENT_RANK."""
+    shas = ["a", "b", "c"]
+    proposals = propose_treatments(_group(shas, 0.9), _request(shas))
+    tri = _first(proposals, LayoutTreatment.TRIPTYCH)
+    packed = _first(proposals, LayoutTreatment.PACKED)
+    assert tri is not None and packed is not None
+    assert tri.score == packed.score
+    assert proposals.index(tri) < proposals.index(packed)
+
+
+def test_packed_weights_default_to_aesthetic_quality() -> None:
+    """The locked default weight source, named in evidence and used in geometry."""
+    shas = ["a", "b", "c", "d", "e"]
+    weights = [0.91, 0.72, 0.70, 0.68, 0.51]
+    proposals = propose_treatments(
+        _weighted_group(shas, 0.9, weights), _request(shas)
+    )
+    packed = _first(proposals, LayoutTreatment.PACKED)
+    assert packed is not None
+    assert packed.evidence["weights"] == weights
+    assert packed.evidence["weight_source"] == "quality.aesthetic_quality"
+    assert [cell["weight"] for cell in packed.evidence["cells"]] == weights
+    areas = [cell["w"] * cell["h"] for cell in packed.evidence["cells"]]
+    assert areas == sorted(areas, reverse=True), areas
+
+
+def test_packed_rationale_is_checkable_against_the_evidence() -> None:
+    shas = ["a", "b", "c"]
+    proposals = propose_treatments(
+        _weighted_group(shas, 0.9, [0.9, 0.4, 0.4]), _request(shas)
+    )
+    packed = _first(proposals, LayoutTreatment.PACKED)
+    assert packed is not None
+    assert "3 cells packed by importance" in packed.rationale[0]
+    assert "0.90/0.40/0.40" in packed.rationale[0]
+    assert "root cut vertical" in packed.rationale[1]
+    assert f"{packed.evidence['gap']}px gutter" in packed.rationale[1]
+    assert f">= {NUP_AFFINITY}" in packed.rationale[2]
+
+
+def test_packed_weights_honor_a_caller_override() -> None:
+    """The per-slice override the locked decision asks for, with its provenance."""
+    shas = ["a", "b", "c"]
+    override = _request(shas, context={"weights": [0.9, 0.4, 0.4]})
+    packed = _first(
+        propose_treatments(_group(shas, 0.9), override), LayoutTreatment.PACKED
+    )
+    baseline = _first(
+        propose_treatments(_group(shas, 0.9), _request(shas)), LayoutTreatment.PACKED
+    )
+    assert packed is not None and baseline is not None
+    assert packed.evidence["weights"] == [0.9, 0.4, 0.4]
+    assert packed.evidence["weight_source"] == "caller_override"
+    assert baseline.evidence["weight_source"] == "quality.aesthetic_quality"
+    assert packed.evidence["cells"][0]["w"] > baseline.evidence["cells"][0]["w"]
+
+
+def test_a_weights_override_of_the_wrong_length_is_rejected() -> None:
+    """A caller-supplied vector is a trust boundary: reject, never pad or truncate."""
+    shas = ["a", "b", "c"]
+    with pytest.raises(ManifestError) as excinfo:
+        propose_treatments(
+            _group(shas, 0.9), _request(shas, context={"weights": [0.9, 0.4]})
+        )
+    assert "one weight per source" in str(excinfo.value)
+
+
+def test_a_non_numeric_weights_override_is_rejected() -> None:
+    shas = ["a", "b", "c"]
+    with pytest.raises(ManifestError):
+        propose_treatments(
+            _group(shas, 0.9), _request(shas, context={"weights": ["a", "b", "c"]})
+        )
+
+
+def test_all_zero_weights_report_uniform_fallback_and_pack_equally() -> None:
+    """weight_source never claims a provenance the geometry did not actually use."""
+    shas = ["a", "b", "c"]
+    req = _request(shas)
+    packed = _first(
+        propose_treatments(_weighted_group(shas, 0.9, [0.0, 0.0, 0.0]), req),
+        LayoutTreatment.PACKED,
+    )
+    assert packed is not None
+    assert packed.evidence["weight_source"] == "uniform_fallback"
+    assert packed.evidence["weights"] == [1.0, 1.0, 1.0]
+    equal = equal_cells(shas, Cell(0, 0, 1920, 1080), gap=33)
+    assert _geometry(packed.evidence["cells"]) == [
+        (r.source_sha256, r.x, r.y, r.w, r.h) for r in equal
+    ]
+
+
+def test_packed_manifest_reproduces_the_proposal_cells_exactly() -> None:
+    """Evidence and manifest agree by construction, not by convention."""
+    shas = ["a", "b", "c", "d", "e"]
+    req = _request(shas)
+    packed = _first(
+        propose_treatments(
+            _weighted_group(shas, 0.9, [0.91, 0.72, 0.70, 0.68, 0.51]), req
+        ),
+        LayoutTreatment.PACKED,
+    )
+    assert packed is not None
+    manifest = materialize_manifest(packed, req, shas)
+    assert _regions(manifest) == _geometry(packed.evidence["cells"])
+    assert manifest.pairing_order == shas
+    assert manifest.layout_treatment is LayoutTreatment.PACKED
+    assert manifest.validate() is None
+
+
+def test_weights_survive_the_proposal_json_round_trip() -> None:
+    """The load-bearing one: cli._manifest re-materializes from a *reloaded* row."""
+    shas = ["a", "b", "c", "d", "e"]
+    req = _request(shas)
+    packed = _first(
+        propose_treatments(
+            _weighted_group(shas, 0.9, [0.91, 0.72, 0.70, 0.68, 0.51]), req
+        ),
+        LayoutTreatment.PACKED,
+    )
+    assert packed is not None
+    reloaded = TreatmentProposal.from_dict(json.loads(json.dumps(packed.to_dict())))
+    assert reloaded == packed
+    assert reloaded.evidence["weights"] == [0.91, 0.72, 0.70, 0.68, 0.51]
+    assert _regions(materialize_manifest(reloaded, req, shas)) == _regions(
+        materialize_manifest(packed, req, shas)
+    )
+
+
+def test_a_reloaded_uniform_manifest_is_not_silently_packed_uniformly() -> None:
+    """A weighted proposal must not degrade to equal cells on the second command."""
+    shas = ["a", "b", "c"]
+    req = _request(shas)
+    packed = _first(
+        propose_treatments(_weighted_group(shas, 0.9, [0.9, 0.3, 0.3]), req),
+        LayoutTreatment.PACKED,
+    )
+    assert packed is not None
+    reloaded = TreatmentProposal.from_dict(json.loads(json.dumps(packed.to_dict())))
+    weighted = _regions(materialize_manifest(reloaded, req, shas))
+    equal = [
+        (r.source_sha256, r.x, r.y, r.w, r.h)
+        for r in equal_cells(shas, Cell(0, 0, 1920, 1080), gap=33)
+    ]
+    assert weighted != equal
+    assert weighted[0][3] > equal[0][3]
+
+
+def test_materialize_rejects_weights_that_do_not_match_the_sources() -> None:
+    """A hand-edited or stale proposals row cannot pack N sources against M weights."""
+    prop = TreatmentProposal(
+        treatment=LayoutTreatment.PACKED, score=0.9, evidence={"weights": [1.0, 1.0]}
+    )
+    with pytest.raises(ManifestError) as excinfo:
+        materialize_manifest(prop, _request(["a", "b", "c"]), ["a", "b", "c"])
+    assert "one weight per source" in str(excinfo.value)
+
+
+def test_a_proposal_without_weights_still_packs_uniformly() -> None:
+    """Every pre-S03 persisted row, and every single-source treatment."""
+    shas = ["a", "b", "c"]
+    prop = TreatmentProposal(treatment=LayoutTreatment.PACKED, score=0.9)
+    manifest = materialize_manifest(prop, _request(shas), shas)
+    assert _regions(manifest) == [
+        (r.source_sha256, r.x, r.y, r.w, r.h)
+        for r in equal_cells(shas, Cell(0, 0, 1920, 1080), gap=33)
+    ]
+
+
+def test_packed_deterministic_repeats() -> None:
+    shas = ["a", "b", "c", "d", "e"]
+    results = _weighted_group(shas, 0.9, [0.91, 0.72, 0.70, 0.68, 0.51])
     req = _request(shas)
     first = propose_treatments(results, req)
     second = propose_treatments(results, req)
