@@ -1,0 +1,231 @@
+"""Tests for the multi-asset ``propose``/``manifest`` CLI surface (M010/S02).
+
+R047's automated proof: N-up layouts must be reachable from a non-API surface.
+Each test drives the real :func:`curator.cli.main` entry point end to end —
+``propose`` ranking a named template, ``manifest`` materializing its cells, and
+``render`` rasterizing that manifest — because a per-layer unit test would stay
+green while the pipeline as a whole remained a no-op. Diptych gets the identical
+three-step treatment: until this slice it was proposable only through a raw API
+call, which is exactly the reachability gap R047 exists to close.
+
+Analysis is real (never a seeded fixture row): the sources are deliberate
+near-kin frames, so ``LocalAnalysisProvider`` derives a genuine cross-image
+affinity above the N-up threshold.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+
+from PIL import Image, ImageDraw
+
+from curator import cli
+from curator.artdirection.manifest import MAX_LAYOUT_SOURCES, ArtDirectionManifest
+
+TARGET_1080P = (1920, 1080)
+TARGET_4K = (3840, 2160)
+
+
+def _kin_image(path, marker: int, width: int = 1600, height: int = 1200) -> None:
+    """Write one frame of a near-kin set: same palette, distinct bytes.
+
+    The shared background and subject give a real ``pairing.affinity`` above
+    :data:`~curator.artdirection.policy.NUP_AFFINITY`; the per-frame marker makes
+    each file's SHA-256 (and therefore its catalog identity) distinct.
+    """
+    img = Image.new("RGB", (width, height), (60, 90, 170))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([200, 150, 900, 900], fill=(210, 180, 60))
+    draw.rectangle([10, 10, 20 + marker, 20], fill=(0, 0, 0))
+    img.save(path)
+
+
+def _kin_folder(tmp_path, count: int, name: str = "kin") -> list[str]:
+    """Ingest *count* near-kin frames and return their resolved asset paths."""
+    folder = tmp_path / name
+    folder.mkdir()
+    paths = []
+    for index in range(count):
+        asset = folder / f"frame{index}.png"
+        _kin_image(asset, index)
+        paths.append(str(asset.resolve()))
+    assert cli.main(["ingest", str(folder)]) == 0
+    return paths
+
+
+def _uningested_files(tmp_path, count: int) -> list[str]:
+    """Write *count* real files that are deliberately never cataloged."""
+    folder = tmp_path / "uncataloged"
+    folder.mkdir()
+    paths = []
+    for index in range(count):
+        asset = folder / f"loose{index}.png"
+        buf = io.BytesIO()
+        Image.new("RGB", (64, 64), (index * 10, 40, 40)).save(buf, format="PNG")
+        asset.write_bytes(buf.getvalue())
+        paths.append(str(asset.resolve()))
+    return paths
+
+
+def _json_out(capsys):
+    """Return the JSON document the last CLI command printed."""
+    return json.loads(capsys.readouterr().out)
+
+
+def _write_manifest(tmp_path, document, name: str = "m.json") -> str:
+    """Persist a printed manifest document to disk for ``curator render``."""
+    path = tmp_path / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return str(path)
+
+
+def _treatments(proposals) -> set[str]:
+    return {proposal["treatment"] for proposal in proposals}
+
+
+# -- propose: N assets in, a named template out -------------------------------
+
+
+def test_propose_three_assets_ranks_a_triptych(data_root, tmp_path, capsys):
+    """Three cataloged assets rank a triptych — N-up from a non-API surface."""
+    assets = _kin_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    proposals = _json_out(capsys)
+    assert "triptych" in _treatments(proposals)
+
+    triptych = next(p for p in proposals if p["treatment"] == "triptych")
+    assert triptych["evidence"]["sources"] == 3
+    assert triptych["evidence"]["affinity_source"] == "pairing.affinity"
+    assert len(triptych["evidence"]["cells"]) == 3
+    assert triptych["rationale"]
+
+
+def test_propose_four_assets_ranks_a_quad(data_root, tmp_path, capsys):
+    """Four cataloged assets rank a quad rather than a truncated pair."""
+    assets = _kin_folder(tmp_path, 4)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    proposals = _json_out(capsys)
+    assert "quad" in _treatments(proposals)
+    assert "triptych" not in _treatments(proposals)
+
+
+def test_propose_single_asset_is_unchanged(data_root, tmp_path, capsys):
+    """One asset still proposes only single-source treatments (no regression)."""
+    assets = _kin_folder(tmp_path, 1)
+    capsys.readouterr()
+
+    assert cli.main(["propose", assets[0], "--json"]) == 0
+    treatments = _treatments(_json_out(capsys))
+    assert treatments
+    assert treatments.isdisjoint({"diptych", "triptych", "quad"})
+
+
+# -- manifest + render: the full multi-asset pipeline --------------------------
+
+
+def test_manifest_and_render_triptych_end_to_end(data_root, tmp_path, capsys):
+    """propose -> manifest -> render for three assets, all through the CLI."""
+    assets = _kin_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["manifest", *assets, "--treatment", "triptych", "--json"]) == 0
+    document = _json_out(capsys)
+    assert document["layout_treatment"] == "triptych"
+    assert document["sources"] == assets
+    assert document["pairing_order"] == assets
+
+    regions = document["regions"]
+    assert len(regions) == 3
+    assert all(r["w"] > 0 and r["h"] > 0 for r in regions)
+    assert max(r["x"] + r["w"] for r in regions) == TARGET_1080P[0]
+    assert max(r["y"] + r["h"] for r in regions) == TARGET_1080P[1]
+    # The printed document is a real manifest, not a display shape.
+    assert ArtDirectionManifest.from_dict(document).validate() is None
+
+    manifest_path = _write_manifest(tmp_path, document)
+    assert cli.main(["render", manifest_path, "--target", "1080p", "--json"]) == 0
+    rendered = _json_out(capsys)
+    assert rendered["treatment"] == "triptych"
+    assert rendered["sources"] == assets
+    assert (rendered["target_width"], rendered["target_height"]) == TARGET_1080P
+
+
+def test_triptych_manifest_renders_at_4k(data_root, tmp_path, capsys):
+    """The same manifest renders at 4K — cells are repacked for the target."""
+    assets = _kin_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["manifest", *assets, "--treatment", "triptych", "--json"]) == 0
+    manifest_path = _write_manifest(tmp_path, _json_out(capsys))
+
+    assert cli.main(["render", manifest_path, "--target", "4k", "--json"]) == 0
+    rendered = _json_out(capsys)
+    assert (rendered["target_width"], rendered["target_height"]) == TARGET_4K
+    assert len(rendered["sources"]) == 3
+
+
+def test_diptych_reachable_end_to_end_from_the_cli(data_root, tmp_path, capsys):
+    """The pre-existing gap, closed: a diptych without a raw API call."""
+    assets = _kin_folder(tmp_path, 2)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    assert "diptych" in _treatments(_json_out(capsys))
+
+    assert cli.main(["manifest", *assets, "--treatment", "diptych", "--json"]) == 0
+    document = _json_out(capsys)
+    assert document["layout_treatment"] == "diptych"
+    assert len(document["regions"]) == 2
+    assert all(region["w"] > 0 for region in document["regions"])
+
+    manifest_path = _write_manifest(tmp_path, document, name="diptych.json")
+    assert cli.main(["render", manifest_path, "--target", "1080p", "--json"]) == 0
+    rendered = _json_out(capsys)
+    assert rendered["treatment"] == "diptych"
+    assert len(rendered["sources"]) == 2
+
+
+# -- reject, never truncate ----------------------------------------------------
+
+
+def test_propose_over_cap_assets_exits_fatal(data_root, tmp_path, capsys):
+    """Ten assets exit 2 naming the cap — and cost zero catalog work.
+
+    The files are deliberately never ingested: if the cap were checked after
+    resolution the failure would be ``no catalog entry``, so the cap message is
+    itself the proof that nothing was resolved or analyzed.
+    """
+    assets = _uningested_files(tmp_path, MAX_LAYOUT_SOURCES + 1)
+
+    assert cli.main(["propose", *assets, "--json"]) == 2
+    err = capsys.readouterr().err
+    assert f"at most {MAX_LAYOUT_SOURCES} assets" in err
+    assert "got 10" in err
+    assert "never truncated" in err
+
+
+def test_manifest_over_cap_assets_exits_fatal(data_root, tmp_path, capsys):
+    """The same cap guards ``manifest`` before any catalog work."""
+    assets = _uningested_files(tmp_path, MAX_LAYOUT_SOURCES + 1)
+
+    assert cli.main(["manifest", *assets, "--json"]) == 2
+    assert "never truncated" in capsys.readouterr().err
+
+
+def test_manifest_rejects_a_template_that_cannot_lay_out_the_assets(
+    data_root, tmp_path, capsys
+):
+    """Two assets can never be a triptych: exit 2, never a truncated render."""
+    assets = _kin_folder(tmp_path, 2)
+    capsys.readouterr()
+
+    assert cli.main(["manifest", *assets, "--treatment", "triptych", "--json"]) == 2
+    assert "no proposal available" in capsys.readouterr().err

@@ -10,13 +10,18 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from curator.api import create_app
-from curator.artdirection.manifest import ArtDirectionManifest, SourceRegion
+from curator.artdirection.manifest import (
+    MAX_LAYOUT_SOURCES,
+    ArtDirectionManifest,
+    SourceRegion,
+)
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.hashing import sha256_hex
@@ -314,6 +319,64 @@ def test_webui_propose_returns_ranked_proposals(client):
         assert isinstance(proposal["rationale"], list)
         assert "score" in proposal
         assert "evidence" in proposal
+
+
+def _kin_png(marker: int, width=1600, height=1200):
+    """A near-kin frame: shared palette and subject, distinct bytes (M010/S02).
+
+    Near-kin so ``LocalAnalysisProvider`` derives a real cross-image affinity
+    above the N-up threshold — the API path analyzes for real, with no fixture.
+    """
+    img = Image.new("RGB", (width, height), (60, 90, 170))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([200, 150, 900, 900], fill=(210, 180, 60))
+    draw.rectangle([10, 10, 20 + marker, 20], fill=(0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_webui_propose_over_cap_sources_is_422(client):
+    """An over-cap ``sources`` list is rejected before the handler body runs."""
+    resp = client.post(
+        "/api/propose",
+        json={"sources": [f"{index:064x}" for index in range(MAX_LAYOUT_SOURCES + 1)]},
+    )
+    assert resp.status_code == 422
+    assert "layout cap" in json.dumps(resp.json())
+
+
+def test_webui_propose_four_sources_ranks_a_quad(client, catalog):
+    """Four sources propose a quad — no [:2] truncation to a pair (M010/S02)."""
+    shas = [catalog.content.put(_kin_png(index)) for index in range(4)]
+    resp = client.post("/api/propose", json={"sources": shas, "target": "1080p"})
+    assert resp.status_code == 200
+    proposals = resp.json()
+    treatments = {proposal["treatment"] for proposal in proposals}
+    assert "quad" in treatments
+    quad = next(p for p in proposals if p["treatment"] == "quad")
+    assert quad["evidence"]["sources"] == 4
+    assert len(quad["evidence"]["cells"]) == 4
+
+
+def test_webui_render_over_cap_manifest_is_400_before_any_fetch(client):
+    """An over-cap manifest is rejected before a single blob is read.
+
+    The shas are deliberately absent from the ContentStore: if validation still
+    ran after the source comprehension the response would be the 404 of a
+    missing blob, so the 400 is itself the proof that nothing was fetched.
+    """
+    shas = [f"{index:064x}" for index in range(MAX_LAYOUT_SOURCES + 1)]
+    resp = client.post(
+        "/api/render",
+        json={
+            "manifest": {"manifest_version": "1", "sources": shas},
+            "target": "1080p",
+        },
+    )
+    assert resp.status_code == 400
+    assert "layout cap" in resp.json()["detail"]
+    assert "never truncated" in resp.json()["detail"]
 
 
 def test_webui_render_downscale_to_1080p(client, catalog):

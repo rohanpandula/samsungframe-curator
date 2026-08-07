@@ -14,9 +14,20 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                and print a human-readable report of unique clusters, exact/
                                near families, best-original flags with phash distances, and
                                the explicit-unsupported (RAW) / corrupt failure surfaces.
+- ``curator propose ASSET...`` — rank art-direction treatments for one or more cataloged
+                               assets (M010/S02): the single-source treatments plus, when the
+                               group coheres, ``diptych`` at two assets, ``triptych`` at three
+                               and ``quad`` at four. Over ``MAX_LAYOUT_SOURCES`` assets is a
+                               fatal exit 2 — rejected, never truncated.
+- ``curator manifest ASSET...`` — build an Art Direction Manifest over one or more cataloged
+                               assets, optionally selecting ``--treatment`` (``diptych`` /
+                               ``triptych`` / ``quad`` included) and resolving it for
+                               ``--target``; the manifest carries one real cell per source.
 - ``curator render SOURCE``   — render an art-direction manifest (``.json``) or a media
                                asset to a target (named ``1080p``/``4k`` or ``WxH``) via the
                                deterministic renderer, printing a summary or ``--json`` result.
+                               A manifest's sources are resolved by content sha (ContentStore)
+                               or by path, so a ``curator manifest`` document renders directly.
 - ``curator validate FILE``   — gate a rendered artifact against expected provenance
                                (``--expected-sha`` + ``--target`` dims); exit 0 publishable /
                                1 not / 2 on read or parse error.
@@ -117,7 +128,9 @@ from curator.analysis.profiles import AnalysisProfile
 from curator.analysis.schema import AnalysisResult
 from curator.approve import ApprovalService
 from curator.artdirection.manifest import (
+    _TREATMENT_SOURCE_COUNT,
     MANIFEST_VERSION,
+    MAX_LAYOUT_SOURCES,
     ArtDirectionManifest,
     LayoutTreatment,
     SourceRegion,
@@ -127,9 +140,7 @@ from curator.artdirection.policy import (
     ArtDirectionRequest,
     TreatmentProposal,
     materialize_manifest,
-)
-from curator.artdirection.policy import (
-    propose as policy_propose,
+    propose_treatments,
 )
 from curator.catalog import Catalog
 from curator.config import CuratorConfig
@@ -304,10 +315,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     propose = sub.add_parser(
         "propose",
-        help="rank art-direction treatments for a single cataloged asset",
+        help="rank art-direction treatments for one or more cataloged assets",
     )
     propose.add_argument(
-        "asset", help="path to a cataloged local media asset"
+        "asset", nargs="+", help="path(s) to cataloged local media asset(s)"
     )
     propose.add_argument(
         "--target",
@@ -322,14 +333,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     manifest = sub.add_parser(
         "manifest",
-        help="build an Art Direction Manifest for a cataloged asset",
+        help="build an Art Direction Manifest for one or more cataloged assets",
     )
     manifest.add_argument(
-        "asset", help="path to a cataloged local media asset"
+        "asset", nargs="+", help="path(s) to cataloged local media asset(s)"
     )
     manifest.add_argument(
         "--treatment",
-        help="select a specific treatment from the asset's proposals",
+        help=(
+            "select a specific treatment from the assets' proposals "
+            "(e.g. single_fullbleed, diptych, triptych, quad)"
+        ),
     )
     manifest.add_argument(
         "--target",
@@ -938,21 +952,64 @@ def _target_dims(target: str) -> tuple[int, int]:
     return dims
 
 
-def _resolve_asset(path: Path) -> tuple[Catalog, int, str]:
-    """Return the catalog entry id for *path* plus the owning :class:`Catalog`.
+def _asset_paths(assets: list[str] | str, command: str) -> list[Path]:
+    """Resolve the ``asset`` positional(s) to existing files (M010/S02).
 
-    The asset's parent folder supplies the LocalConnector so the connector id
-    matches the one ingest wrote. Raises :class:`CatalogEntryNotFound` (and
-    through ``main``, a fatal exit 2) when the asset has not been cataloged.
+    The :data:`MAX_LAYOUT_SOURCES` cap is checked **first**, before any path is
+    touched and long before any catalog resolution or analysis runs, so an
+    over-cap request costs zero work — and is rejected with an actionable
+    message rather than silently truncated to the first N.
     """
-    connector = LocalConnector(path.parent)
+    raw = [assets] if isinstance(assets, str) else list(assets)
+    if len(raw) > MAX_LAYOUT_SOURCES:
+        raise CuratorError(
+            f"{command} accepts at most {MAX_LAYOUT_SOURCES} assets, got {len(raw)} "
+            f"— an over-cap request is rejected, never truncated"
+        )
+    paths: list[Path] = []
+    for asset in raw:
+        path = Path(asset).resolve()
+        if not path.is_file():
+            raise CuratorError(f"{command} source is not a file: {asset!r}")
+        paths.append(path)
+    return paths
+
+
+def _resolve_assets(paths: list[Path]) -> tuple[Catalog, list[int], list[str]]:
+    """Return the catalog entry ids for *paths* plus the one owning :class:`Catalog`.
+
+    Exactly one :class:`Catalog` is opened for the whole batch (never one per
+    asset) and closed on any failure, so a partially-resolved multi-asset request
+    leaks no connection. Each asset's parent folder supplies the LocalConnector
+    so the connector id matches the one ingest wrote. Raises
+    :class:`CatalogEntryNotFound` (and through ``main``, a fatal exit 2) for the
+    first asset that has not been cataloged.
+    """
     catalog = Catalog()
+    entry_ids: list[int] = []
+    sources: list[str] = []
     try:
-        entry_id = resolve_catalog_entry(catalog, connector.connector_id, str(path))
+        for path in paths:
+            connector = LocalConnector(path.parent)
+            entry_ids.append(
+                resolve_catalog_entry(catalog, connector.connector_id, str(path))
+            )
+            sources.append(str(path))
     except Exception:
         catalog.db.close()
         raise
-    return catalog, entry_id, str(path)
+    return catalog, entry_ids, sources
+
+
+def _resolve_asset(path: Path) -> tuple[Catalog, int, str]:
+    """Return the catalog entry id for one *path* plus the owning :class:`Catalog`.
+
+    The single-path delegate over :func:`_resolve_assets`, kept so callers that
+    genuinely resolve one asset (``curator review``'s sibling idiom, and M010/S04's
+    group seed) keep a signature that cannot be handed a list by accident.
+    """
+    catalog, entry_ids, sources = _resolve_assets([path])
+    return catalog, entry_ids[0], sources[0]
 
 
 def _load_analysis(catalog: Catalog, entry_id: int) -> AnalysisResult | None:
@@ -971,44 +1028,58 @@ def _load_analysis(catalog: Catalog, entry_id: int) -> AnalysisResult | None:
     return AnalysisResult.from_dict(json.loads(row[0]))
 
 
-def _analyze_or_reuse(
-    catalog: Catalog, entry_id: int, source: str, request: ArtDirectionRequest
+def _analyze_all_or_reuse(
+    catalog: Catalog,
+    entry_ids: list[int],
+    sources: list[str],
+    request: ArtDirectionRequest,
 ) -> list[TreatmentProposal]:
-    """Run the policy engine, reusing persisted analysis when available.
+    """Run the policy engine over every requested asset (M010/S02).
 
-    Prefers the newest persisted ``ok`` analysis (deterministic + fast), falling
-    back to a fresh local analysis of *source* bytes otherwise. Returns the
-    ranked :class:`TreatmentProposal` list.
+    Derives one :class:`AnalysisResult` per asset, in request order: the newest
+    persisted ``ok`` row when there is one (deterministic and fast), else a fresh
+    local analysis of that asset's bytes. Every fresh analysis goes through a
+    *single* :class:`LocalAnalysisProvider`, so the policy engine can ask it for
+    a real cross-image affinity between assets it analyzed; a pair it never saw
+    falls back per comparison to the stored ``pairing.affinity``. Returns the
+    ranked :class:`TreatmentProposal` list for the whole group.
     """
-    persisted = _load_analysis(catalog, entry_id)
-    if persisted is not None:
-        return policy_propose([source], request, analysis=[persisted])
-    return policy_propose([source], request, provider=LocalAnalysisProvider())
+    provider = LocalAnalysisProvider()
+    results: list[AnalysisResult] = []
+    for entry_id, source in zip(entry_ids, sources, strict=True):
+        persisted = _load_analysis(catalog, entry_id)
+        results.append(persisted if persisted is not None else provider.analyze(source))
+    return propose_treatments(results, request, provider=provider)
 
 
 def _propose(args: argparse.Namespace) -> int:
-    """Propose art-direction treatments for a single cataloged asset.
+    """Propose art-direction treatments for one or more cataloged assets.
 
-    Resolves *args.asset* to its catalog entry, derives an :class:`AnalysisResult`
-    (reusing a persisted one, else analyzing fresh), runs the S03 policy engine,
+    Resolves every ``asset`` path to its catalog entry, derives one
+    :class:`AnalysisResult` each (reusing persisted ones, else analyzing fresh),
+    runs the policy engine over the whole group — single-source treatments from
+    the primary plus ``diptych``/``triptych``/``quad`` when the group coheres —
     persists the resulting proposals to ``proposals`` (append-only), and prints
     them ranked (human or ``--json``). Returns :data:`EXIT_OK` (0) when proposals
     exist, :data:`EXIT_NO_CHANGE` (3) when the policy produced none.
+
+    **The primary source owns the persisted row** (Open Question #3): proposals
+    are recorded against ``entry_ids[0]``, extending the precedent
+    ``api._record_render`` already set for the renders journal. The manifest JSON
+    itself carries every source, so no junction table is needed.
     """
-    path = Path(args.asset).resolve()
-    if not path.is_file():
-        raise CuratorError(f"propose source is not a file: {args.asset!r}")
+    paths = _asset_paths(args.asset, "propose")
     width, height = _target_dims(args.target)
     request = ArtDirectionRequest(
         target=args.target,
         target_width=width,
         target_height=height,
-        sources=[str(path)],
+        sources=[str(path) for path in paths],
     )
-    catalog, entry_id, source = _resolve_asset(path)
+    catalog, entry_ids, sources = _resolve_assets(paths)
     try:
-        proposals = _analyze_or_reuse(catalog, entry_id, source, request)
-        _persist_proposals(catalog, entry_id, proposals)
+        proposals = _analyze_all_or_reuse(catalog, entry_ids, sources, request)
+        _persist_proposals(catalog, entry_ids[0], proposals)
     finally:
         catalog.db.close()
     if not proposals:
@@ -1021,32 +1092,35 @@ def _propose(args: argparse.Namespace) -> int:
 
 
 def _manifest(args: argparse.Namespace) -> int:
-    """Build and persist an :class:`ArtDirectionManifest` for a cataloged asset.
+    """Build and persist an :class:`ArtDirectionManifest` over one or more assets.
 
     Chooses a :class:`TreatmentProposal` (the ``--treatment`` one, else the
-    top-ranked) for the asset's catalog entry, materializes a base manifest via
-    :func:`materialize_manifest`, attaches deterministic per-target overrides,
-    resolves the base for ``--target``, and persists the validated result to
+    top-ranked proposal that can actually lay out this many sources),
+    materializes a base manifest via :func:`materialize_manifest` — one real cell
+    per source — attaches deterministic per-target overrides, resolves the base
+    for ``--target``, and persists the validated result to
     ``art_direction_manifests`` (append-only). Returns :data:`EXIT_OK` (0).
+
+    **The primary source owns the persisted row** (Open Question #3): the
+    manifest is recorded against ``entry_ids[0]``, extending
+    ``api._record_render``'s precedent. Every source is in the manifest JSON.
     """
-    path = Path(args.asset).resolve()
-    if not path.is_file():
-        raise CuratorError(f"manifest source is not a file: {args.asset!r}")
+    paths = _asset_paths(args.asset, "manifest")
     base_width, base_height = _target_dims(DEFAULT_TARGET)
     request = ArtDirectionRequest(
         target=DEFAULT_TARGET,
         target_width=base_width,
         target_height=base_height,
-        sources=[str(path)],
+        sources=[str(path) for path in paths],
     )
-    catalog, entry_id, source = _resolve_asset(path)
+    catalog, entry_ids, sources = _resolve_assets(paths)
     try:
-        proposal = _select_proposal(catalog, entry_id, args.treatment, source, request)
+        proposal = _select_proposal(catalog, entry_ids, args.treatment, sources, request)
         base = _attach_target_overrides(
-            materialize_manifest(proposal, request, [source])
+            materialize_manifest(proposal, request, sources)
         )
         manifest = base.resolved_for(args.target)
-        _persist_manifest(catalog, entry_id, manifest)
+        _persist_manifest(catalog, entry_ids[0], manifest)
     finally:
         catalog.db.close()
     if args.json:
@@ -1058,25 +1132,44 @@ def _manifest(args: argparse.Namespace) -> int:
 
 def _select_proposal(
     catalog: Catalog,
-    entry_id: int,
+    entry_ids: list[int],
     treatment: str | None,
-    source: str,
+    sources: list[str],
     request: ArtDirectionRequest,
 ) -> TreatmentProposal:
-    """Return the chosen proposal for *entry_id*, generating it if needed.
+    """Return the chosen proposal for the primary entry, generating it if needed.
 
-    Prefers an already-persisted proposal (matching *treatment* when given),
-    else falls back to running the policy engine (persisting its output).
+    Prefers an already-persisted proposal (matching *treatment* when given), else
+    falls back to running the policy engine over every asset (persisting its
+    output). Candidates whose named template cannot lay out exactly
+    ``len(sources)`` sources are skipped rather than selected and then rejected
+    by :func:`materialize_manifest` — a diptych is not an answer to three assets.
     Raises :class:`CuratorError` when no proposal can be produced.
     """
+    entry_id = entry_ids[0]
     rows = _load_proposals(catalog, entry_id, treatment)
     if not rows:
-        fresh = _analyze_or_reuse(catalog, entry_id, source, request)
+        fresh = _analyze_all_or_reuse(catalog, entry_ids, sources, request)
         _persist_proposals(catalog, entry_id, fresh)
         rows = _load_proposals(catalog, entry_id, treatment)
-    if not rows:
-        raise CuratorError(f"no proposal available to manifest for catalog entry {entry_id}")
-    return rows[0]
+    usable = [row for row in rows if _lays_out(row.treatment, len(sources))]
+    if not usable:
+        raise CuratorError(
+            f"no proposal available to manifest {len(sources)} source(s) for "
+            f"catalog entry {entry_id}"
+        )
+    return usable[0]
+
+
+def _lays_out(treatment: LayoutTreatment, source_count: int) -> bool:
+    """True when *treatment* can lay out exactly *source_count* sources.
+
+    A treatment with no entry in ``_TREATMENT_SOURCE_COUNT`` has no fixed width
+    (the single-source treatments render the primary; M010/S03's ``packed`` is
+    variable by design), so only the named fixed-size templates are constrained.
+    """
+    required = _TREATMENT_SOURCE_COUNT.get(treatment)
+    return required is None or required == source_count
 
 
 def _load_proposals(
@@ -1215,10 +1308,10 @@ def _render(args: argparse.Namespace) -> int:
     """Render *args.source* to *args.target*; print a summary or ``--json`` result.
 
     A ``.json`` source is loaded via :class:`ArtDirectionManifest` (resolved for
-    *args.target*) with every referenced source sha fetched from the
-    :class:`ContentStore`; any other source is treated as a media asset and
-    rendered through a deterministic single-full-bleed manifest built from its
-    bytes. Maps ``--target`` to pixel dims, renders via
+    *args.target*) with every referenced source resolved by
+    :func:`_manifest_source_bytes`; any other source is treated as a media asset
+    and rendered through a deterministic single-full-bleed manifest built from
+    its bytes. Maps ``--target`` to pixel dims, renders via
     :class:`DeterministicRenderer`, and returns :data:`EXIT_OK` (0). An unapproved
     upscale raises :class:`RenderError` (R008), which is reported to stderr and
     returned as :data:`EXIT_FATAL` (2).
@@ -1235,7 +1328,7 @@ def _render(args: argparse.Namespace) -> int:
         except (json.JSONDecodeError, CuratorError, OSError) as exc:
             print(f"curator: error: failed to load manifest {path}: {exc}", file=sys.stderr)
             return EXIT_FATAL
-        sources = {sha: ContentStore().get(sha) for sha in manifest.sources}
+        sources = _manifest_source_bytes(manifest)
     else:
         data = path.read_bytes()
         sha = sha256_hex(data)
@@ -1256,6 +1349,33 @@ def _render(args: argparse.Namespace) -> int:
     else:
         print(_format_render(result))
     return EXIT_OK
+
+
+def _manifest_source_bytes(manifest: ArtDirectionManifest) -> dict[str, bytes]:
+    """Return ``{source: bytes}`` for every source *manifest* names (M010/S02).
+
+    A manifest names its sources by whatever identity produced it, and both
+    identities are first-class here: ``POST /api/render`` and hand-authored
+    manifests name **content shas**, resolved from the :class:`ContentStore`,
+    while ``curator manifest`` names the **cataloged asset paths** it was handed,
+    read from disk. Resolving both is what makes ``curator manifest ... > m.json
+    && curator render m.json`` an actual pipeline instead of two commands that
+    speak different identities; a name that is neither is a fatal, actionable
+    error rather than a stray ``StorageError``.
+    """
+    store = ContentStore()
+    resolved: dict[str, bytes] = {}
+    for source in manifest.sources:
+        if len(source) == 64 and all(char in "0123456789abcdef" for char in source):
+            resolved[source] = store.get(source)
+            continue
+        asset = Path(source)
+        if not asset.is_file():
+            raise CuratorError(
+                f"manifest source {source!r} is neither a content sha nor a readable file"
+            )
+        resolved[source] = asset.read_bytes()
+    return resolved
 
 
 def _format_render(result: RenderResult) -> str:

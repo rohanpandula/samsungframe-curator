@@ -74,7 +74,7 @@ from typing import Any
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from starlette.responses import FileResponse
 
 from curator.analysis.cli_utils import resolve_catalog_entry
@@ -83,7 +83,12 @@ from curator.analysis.local import LocalAnalysisProvider
 from curator.analysis.profiles import AnalysisProfile
 from curator.analysis.schema import AnalysisResult
 from curator.approve import ApprovalError, ApprovalService
-from curator.artdirection.manifest import ArtDirectionManifest, SourceRegion
+from curator.artdirection.manifest import (
+    MAX_LAYOUT_SOURCES,
+    ArtDirectionManifest,
+    ManifestError,
+    SourceRegion,
+)
 from curator.artdirection.packing import resolve_regions
 from curator.artdirection.policy import ArtDirectionRequest, propose_treatments
 from curator.catalog import Catalog
@@ -174,8 +179,15 @@ class ProposeRequest(BaseModel):
     """JSON request body for ``POST /api/propose``.
 
     One source comes from ``asset``/``bytes`` (primary); ``sources`` may supply
-    additional content shas (a second one enables a diptych proposal). The
-    target is ``1080p``/``4k`` (or an explicit width/height pair).
+    additional content shas — two enable a diptych, three a triptych and four a
+    quad (M010/S02). The target is ``1080p``/``4k`` (or an explicit width/height
+    pair).
+
+    ``sources`` is capped at :data:`MAX_LAYOUT_SOURCES` entries. Until M010/S02
+    the handler's ``[:2]`` slice was accidentally the *only* bound on this
+    field, so the cap lands in the same change that removes the truncation:
+    de-truncating without it would turn an accidentally-bounded list into an
+    unbounded one (T-10-06).
     """
 
     asset: str | None = None
@@ -185,6 +197,18 @@ class ProposeRequest(BaseModel):
     target_width: int | None = None
     target_height: int | None = None
     allow_diptych: bool = True
+
+    @field_validator("sources")
+    @classmethod
+    def _cap_sources(cls, value: list[str]) -> list[str]:
+        """Reject an over-cap source list before the handler body runs (422)."""
+        if len(value) > MAX_LAYOUT_SOURCES:
+            raise ValueError(
+                f"sources has {len(value)} entries, over the "
+                f"{MAX_LAYOUT_SOURCES}-source layout cap — an over-cap request is "
+                f"rejected, never truncated"
+            )
+        return value
 
 
 class RenderRequest(BaseModel):
@@ -510,21 +534,44 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
 
     @app.post("/api/propose")
     def propose(body: ProposeRequest, request: Request) -> list[dict]:
-        """Rank applicable layout treatments for the requested sources."""
+        """Rank applicable layout treatments for the requested sources.
+
+        Every source is analyzed and every source reaches the policy engine
+        (M010/S02) — the ``[:1]``/``[:2]`` slices that used to bound this handler
+        silently discarded any third image the caller selected. The bound is now
+        explicit: :data:`MAX_LAYOUT_SOURCES`, enforced on ``sources`` by a
+        validator (422) and again on the combined list once the primary sha is
+        known, before a single image is analyzed (T-10-06).
+        """
         catalog = _catalog(request)
         provider = LocalAnalysisProvider()
         results = []
         sources_sha = list(body.sources)
         primary_sha = None
+        primary_data: bytes | None = None
         try:
             if body.asset or body.bytes:
-                data, primary_sha = _resolve_image(catalog, body.asset, body.bytes)
-                results.append(
-                    provider.analyze(data, AnalysisProfile.BALANCED, asset_id=primary_sha)
+                primary_data, primary_sha = _resolve_image(
+                    catalog, body.asset, body.bytes
                 )
                 if primary_sha not in sources_sha:
                     sources_sha.insert(0, primary_sha)
-            for other in [s for s in sources_sha if s != primary_sha][:1]:
+            if len(sources_sha) > MAX_LAYOUT_SOURCES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"request names {len(sources_sha)} sources, over the "
+                        f"{MAX_LAYOUT_SOURCES}-source layout cap — an over-cap "
+                        f"request is rejected, never truncated"
+                    ),
+                )
+            if primary_data is not None and primary_sha is not None:
+                results.append(
+                    provider.analyze(
+                        primary_data, AnalysisProfile.BALANCED, asset_id=primary_sha
+                    )
+                )
+            for other in [s for s in sources_sha if s != primary_sha]:
                 results.append(
                     provider.analyze(
                         _fetch(catalog.content, other),
@@ -540,7 +587,7 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             target=target_name,
             target_width=target[0],
             target_height=target[1],
-            sources=sources_sha[:2],
+            sources=list(sources_sha),
             allow_diptych=body.allow_diptych,
         )
         return [
@@ -591,11 +638,20 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         The rendered PNG bytes are persisted into the ContentStore (content-
         addressed by their SHA-256) and a ``renders`` journal row is appended.
         The response expands :class:`RenderResult` with the stored ``artifact_sha``.
+
+        The manifest is validated **before** any source bytes are fetched
+        (M010/S02): ``DeterministicRenderer`` validates too, but only after this
+        handler has already read N blobs out of the ContentStore, so an over-cap
+        or malformed manifest would have cost N reads to reject (T-10-07).
         """
         catalog = _catalog(request)
         target = _parse_target(body.target, body.target_width, body.target_height)
         sources_b64 = body.sources or {}
         manifest = _resolve_manifest(catalog, body, sources_b64)
+        try:
+            manifest.validate()
+        except ManifestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         sources = {
             sha: (
                 _decode_b64(sources_b64[sha])
