@@ -74,6 +74,29 @@ def _uningested_files(tmp_path, count: int) -> list[str]:
     return paths
 
 
+def _crop_risky_first_of_three(tmp_path) -> list[str]:
+    """Three cataloged assets whose first is genuinely crop-risky (CR-01, real analysis).
+
+    A bright block touching two edges of the primary frame is what makes
+    ``LocalAnalysisProvider`` propose CONTAIN_MATTE for it — the other two frames
+    are unrelated content, since only the primary's own crop safety decides a
+    single-cell proposal.
+    """
+    folder = tmp_path / "crop_risky_trio"
+    folder.mkdir()
+    risky = folder / "frame0.png"
+    img = Image.new("RGB", (1600, 1200), (20, 20, 20))
+    ImageDraw.Draw(img).rectangle([0, 0, 900, 800], fill=(200, 200, 200))
+    img.save(risky)
+    paths = [str(risky.resolve())]
+    for index in (1, 2):
+        asset = folder / f"frame{index}.png"
+        Image.new("RGB", (1600, 1200), (30 * index, 60, 90)).save(asset)
+        paths.append(str(asset.resolve()))
+    assert cli.main(["ingest", str(folder)]) == 0
+    return paths
+
+
 def _json_out(capsys):
     """Return the JSON document the last CLI command printed."""
     return json.loads(capsys.readouterr().out)
@@ -235,6 +258,25 @@ def test_manifest_rejects_a_template_that_cannot_lay_out_the_assets(
 
     assert cli.main(["manifest", *assets, "--treatment", "triptych", "--json"]) == 2
     assert "no proposal available" in capsys.readouterr().err
+
+
+def test_manifest_rejects_a_single_cell_treatment_for_three_assets(
+    data_root, tmp_path, capsys
+):
+    """CR-01: forcing a single-cell treatment onto three assets used to silently
+    fabricate real, tiled 3-cell geometry that CONTAIN_MATTE's renderer branch
+    then ignored — rendering only ``frame0.png`` while ``curator validate``
+    reported the manifest as a genuine three-way composition. It must now be
+    rejected at selection time (``cli._lays_out``), before the materializer.
+    """
+    assets = _crop_risky_first_of_three(tmp_path)
+    capsys.readouterr()
+
+    assert (
+        cli.main(["manifest", *assets, "--treatment", "contain_matte", "--json"]) == 2
+    )
+    err = capsys.readouterr().err
+    assert "no proposal available" in err
 
 
 # -- M010/S03: packed — arbitrary N, weighted, end to end ---------------------

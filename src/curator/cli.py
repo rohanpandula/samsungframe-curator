@@ -1377,9 +1377,17 @@ def _lays_out(treatment: LayoutTreatment, source_count: int) -> bool:
     """True when *treatment* can lay out exactly *source_count* sources.
 
     A treatment with no entry in ``_TREATMENT_SOURCE_COUNT`` has no fixed width.
-    That splits two ways: the single-source treatments render the primary and are
-    unconstrained, while M010/S03's ``packed`` is variable *within a range* — it
-    is a multi-cell treatment, so it needs at least two sources and at most
+    That splits two ways: the single-source treatments (SINGLE_FULLBLEED,
+    CONTAIN_MATTE, PANORAMIC, SQUARE) always render only the primary and so
+    require *exactly* one source (CR-01) — the defense-in-depth mirror of
+    ``materialize_manifest``'s own rejection of a single-cell treatment handed
+    more than one source. Without this, a single-cell proposal that happened to
+    outscore the group's multi-cell candidates could be selected for a
+    multi-source ``manifest`` and only then rejected (or, before CR-01's fix,
+    silently materialized with fabricated tiled geometry the renderer would
+    never draw) — a correct error surfacing at the wrong layer, or no error at
+    all. M010/S03's ``packed`` is variable *within a range* instead — it is a
+    multi-cell treatment, so it needs at least two sources and at most
     :data:`MAX_LAYOUT_SOURCES`, exactly the bound ``renderer._multi_cell``
     enforces. Without that, a ``packed`` proposal persisted from a five-asset
     ``propose`` would be selected for a later single-asset ``manifest`` and then
@@ -1390,7 +1398,7 @@ def _lays_out(treatment: LayoutTreatment, source_count: int) -> bool:
         return required == source_count
     if treatment in MULTI_CELL_TREATMENTS:
         return 2 <= source_count <= MAX_LAYOUT_SOURCES
-    return True
+    return source_count == 1
 
 
 def _load_proposals(

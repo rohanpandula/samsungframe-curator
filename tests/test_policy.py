@@ -362,6 +362,31 @@ def test_materialize_rejects_triptych_with_two_sources() -> None:
         materialize_manifest(prop, _request(["a", "b"]), ["a", "b"])
 
 
+def test_materialize_rejects_single_cell_treatment_with_multiple_sources() -> None:
+    """CR-01: a single-cell treatment used to fabricate real, tiled multi-cell
+    geometry whenever handed more than one source — even though its renderer
+    branch (SINGLE_FULLBLEED/CONTAIN_MATTE/PANORAMIC/SQUARE) only ever reads
+    ``sources[0]`` and never consults ``regions``. It must reject instead."""
+    prop = TreatmentProposal(treatment=LayoutTreatment.CONTAIN_MATTE, score=0.9)
+    with pytest.raises(ManifestError) as excinfo:
+        materialize_manifest(prop, _request(["a", "b", "c"]), ["a", "b", "c"])
+    message = str(excinfo.value)
+    assert "contain_matte" in message
+    assert "exactly one source" in message
+    assert "got 3" in message
+
+
+def test_materialize_single_cell_treatment_with_one_source_still_works() -> None:
+    """The exact-one-source case is unaffected: one real, unset region."""
+    prop = TreatmentProposal(treatment=LayoutTreatment.SINGLE_FULLBLEED, score=0.9)
+    manifest = materialize_manifest(prop, _request(["only"]), ["only"])
+    assert manifest.sources == ["only"]
+    assert len(manifest.regions) == 1
+    assert manifest.regions[0].source_sha256 == "only"
+    assert manifest.regions[0].is_unset
+    assert manifest.validate() is None
+
+
 def test_nup_deterministic_repeats() -> None:
     """Identical N-up input yields an identical, identically-ordered result."""
     shas = ["a", "b", "c", "d"]

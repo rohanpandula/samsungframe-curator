@@ -465,10 +465,14 @@ def materialize_manifest(
     Raises :class:`~curator.artdirection.manifest.ManifestError` when more than
     :data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES` sources are given,
     when a fixed-size named template is handed the wrong number of sources
-    (M010/S02), or when the stored per-cell fit is out of vocabulary or does not
-    cover this source count — rather than materializing a manifest
-    :meth:`ArtDirectionManifest.validate` would reject, or one the renderer would
-    quietly truncate.
+    (M010/S02), when a single-cell treatment (anything outside
+    :data:`~curator.artdirection.manifest.MULTI_CELL_TREATMENTS`) is handed more
+    than one source (CR-01) — its renderer branch only ever reads ``sources[0]``
+    and never consults ``regions``, so slicing the canvas into real, tiled cells
+    here would fabricate geometry the renderer silently ignores — or when the
+    stored per-cell fit is out of vocabulary or does not cover this source count
+    — rather than materializing a manifest :meth:`ArtDirectionManifest.validate`
+    would reject, or one the renderer would quietly truncate.
     """
     if len(sources_sha) > MAX_LAYOUT_SOURCES:
         raise ManifestError(
@@ -492,21 +496,38 @@ def materialize_manifest(
             background_choice=str(choice) if choice is not None else "none"
         )
     target = (request.target_width, request.target_height)
-    order = pairing_order or list(sources_sha)
-    weights = _manifest_weights(proposal, sources_sha)
-    regions = slice_cells(
-        [
-            WeightedSource(sha, weight)
-            for sha, weight in zip(order, weights, strict=True)
-        ],
-        Cell(0, 0, request.target_width, request.target_height),
-        gap=gutter_for_target(target),
-    )
-    crops = _manifest_crops(proposal, sources_sha)
-    regions = [
-        replace(region, crop=crops.get(region.source_sha256))
-        for region in regions
-    ]
+    if treatment in MULTI_CELL_TREATMENTS:
+        order = pairing_order or list(sources_sha)
+        weights = _manifest_weights(proposal, sources_sha)
+        regions = slice_cells(
+            [
+                WeightedSource(sha, weight)
+                for sha, weight in zip(order, weights, strict=True)
+            ],
+            Cell(0, 0, request.target_width, request.target_height),
+            gap=gutter_for_target(target),
+        )
+        crops = _manifest_crops(proposal, sources_sha)
+        regions = [
+            replace(region, crop=crops.get(region.source_sha256))
+            for region in regions
+        ]
+    else:
+        # CR-01: a single-cell treatment's renderer branch (SINGLE_FULLBLEED /
+        # CONTAIN_MATTE / PANORAMIC / SQUARE) only ever reads ``sources[0]`` and
+        # never consults ``regions`` at all. Calling `slice_cells` here regardless
+        # of source count used to fabricate real, disjoint, tiled geometry for
+        # every requested source — geometry `curator validate` would happily bless
+        # as a genuine N-way composition even though the renderer only ever draws
+        # the first image. Reject instead: a single-cell treatment is materialized
+        # only for the exact one source it was proposed from.
+        if len(sources_sha) != 1:
+            raise ManifestError(
+                f"{treatment.value} lays out exactly one source, got "
+                f"{len(sources_sha)} — a single-cell treatment cannot be "
+                f"materialized for a multi-source request"
+            )
+        regions = [SourceRegion(source_sha256=sources_sha[0])]
     return ArtDirectionManifest(
         manifest_version=MANIFEST_VERSION,
         sources=list(sources_sha),
