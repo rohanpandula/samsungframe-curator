@@ -11,6 +11,12 @@ call, which is exactly the reachability gap R047 exists to close.
 Analysis is real (never a seeded fixture row): the sources are deliberate
 near-kin frames, so ``LocalAnalysisProvider`` derives a genuine cross-image
 affinity above the N-up threshold.
+
+M010/S03 extends the same three-step treatment to ``packed`` at N=5 — the count
+with no named template at all — and to ``propose --weights``, whose round trip is
+the load-bearing case: ``manifest`` re-materializes from a proposal reloaded out
+of SQLite, so a weight that did not survive persistence would silently produce
+equal cells on the second command.
 """
 
 from __future__ import annotations
@@ -229,3 +235,123 @@ def test_manifest_rejects_a_template_that_cannot_lay_out_the_assets(
 
     assert cli.main(["manifest", *assets, "--treatment", "triptych", "--json"]) == 2
     assert "no proposal available" in capsys.readouterr().err
+
+
+# -- M010/S03: packed — arbitrary N, weighted, end to end ---------------------
+
+
+def _packed(proposals) -> dict:
+    return next(p for p in proposals if p["treatment"] == "packed")
+
+
+def test_propose_five_assets_ranks_a_packed_layout(data_root, tmp_path, capsys):
+    """Five assets have no named template — arbitrary N is reachable anyway."""
+    assets = _kin_folder(tmp_path, 5)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    proposals = _json_out(capsys)
+    assert "packed" in _treatments(proposals)
+    assert _treatments(proposals).isdisjoint({"triptych", "quad"})
+
+    packed = _packed(proposals)
+    assert packed["evidence"]["sources"] == 5
+    assert len(packed["evidence"]["cells"]) == 5
+    assert len(packed["evidence"]["weights"]) == 5
+    assert packed["evidence"]["weight_source"] == "quality.aesthetic_quality"
+    assert packed["rationale"]
+
+
+def test_propose_weights_widen_the_first_cell(data_root, tmp_path, capsys):
+    """The override is real: the same three assets, a visibly bigger first cell."""
+    assets = _kin_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    baseline = _packed(_json_out(capsys))
+    assert baseline["evidence"]["weight_source"] == "quality.aesthetic_quality"
+
+    assert cli.main(["propose", *assets, "--weights", "0.9,0.4,0.4", "--json"]) == 0
+    weighted = _packed(_json_out(capsys))
+    assert weighted["evidence"]["weight_source"] == "caller_override"
+    assert weighted["evidence"]["weights"] == [0.9, 0.4, 0.4]
+    assert weighted["evidence"]["cells"][0]["w"] > baseline["evidence"]["cells"][0]["w"]
+    assert weighted["evidence"]["cells"][0]["w"] > weighted["evidence"]["cells"][1]["w"]
+
+
+def test_propose_weights_count_mismatch_exits_fatal(data_root, tmp_path, capsys):
+    """One weight per asset, or exit 2 — never padded, never truncated."""
+    assets = _kin_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--weights", "0.9,0.4", "--json"]) == 2
+    err = capsys.readouterr().err
+    assert "2 value(s) for 3 asset(s)" in err
+
+
+def test_propose_weights_non_numeric_exits_fatal(data_root, tmp_path, capsys):
+    assets = _kin_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--weights", "0.9,huge,0.4", "--json"]) == 2
+    assert "not a number" in capsys.readouterr().err
+
+
+def test_manifest_and_render_packed_end_to_end(data_root, tmp_path, capsys):
+    """propose -> manifest -> render at N=5, with the weights surviving SQLite."""
+    assets = _kin_folder(tmp_path, 5)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    cells = _packed(_json_out(capsys))["evidence"]["cells"]
+
+    assert cli.main(["manifest", *assets, "--treatment", "packed", "--json"]) == 0
+    document = _json_out(capsys)
+    assert document["layout_treatment"] == "packed"
+    assert document["sources"] == assets
+    assert document["pairing_order"] == assets
+
+    regions = document["regions"]
+    assert len(regions) == 5
+    # Re-materialized from the *persisted* proposal: identical geometry, which is
+    # only true because the weights travelled in evidence rather than in a local.
+    assert [(r["source_sha256"], r["x"], r["y"], r["w"], r["h"]) for r in regions] == [
+        (c["sha"], c["x"], c["y"], c["w"], c["h"]) for c in cells
+    ]
+    assert max(r["x"] + r["w"] for r in regions) == TARGET_1080P[0]
+    assert max(r["y"] + r["h"] for r in regions) == TARGET_1080P[1]
+    assert ArtDirectionManifest.from_dict(document).validate() is None
+
+    manifest_path = _write_manifest(tmp_path, document, name="packed.json")
+    assert cli.main(["render", manifest_path, "--target", "1080p", "--json"]) == 0
+    rendered = _json_out(capsys)
+    assert rendered["treatment"] == "packed"
+    assert len(rendered["sources"]) == 5
+
+
+def test_packed_manifest_renders_at_4k(data_root, tmp_path, capsys):
+    """The 1080p-materialized packed manifest fills a 4K canvas, not a quadrant."""
+    assets = _kin_folder(tmp_path, 5)
+    capsys.readouterr()
+
+    assert cli.main(["manifest", *assets, "--treatment", "packed", "--json"]) == 0
+    manifest_path = _write_manifest(tmp_path, _json_out(capsys), name="packed4k.json")
+
+    assert cli.main(["render", manifest_path, "--target", "4k", "--json"]) == 0
+    rendered = _json_out(capsys)
+    assert (rendered["target_width"], rendered["target_height"]) == TARGET_4K
+    assert len(rendered["sources"]) == 5
+
+
+def test_manifest_of_one_asset_ignores_a_packed_proposal(data_root, tmp_path, capsys):
+    """A packed proposal from a five-asset propose is not an answer to one asset."""
+    assets = _kin_folder(tmp_path, 5)
+    capsys.readouterr()
+
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["manifest", assets[0], "--json"]) == 0
+    document = _json_out(capsys)
+    assert document["layout_treatment"] != "packed"
+    assert len(document["regions"]) == 1

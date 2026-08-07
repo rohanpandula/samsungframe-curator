@@ -617,6 +617,78 @@ def test_packed_with_one_source_is_rejected() -> None:
     assert "got 1" in message
 
 
+def _weighted_packed_manifest(order: list[str], weights: list[float]):
+    """Materialize a packed manifest at 1080p through the real policy engine."""
+    from curator.artdirection.policy import (
+        ArtDirectionRequest,
+        TreatmentProposal,
+        materialize_manifest,
+    )
+
+    proposal = TreatmentProposal(
+        treatment=LayoutTreatment.PACKED,
+        score=0.9,
+        evidence={"weights": list(weights)},
+    )
+    request = ArtDirectionRequest(
+        target="1080p", target_width=1920, target_height=1080, sources=list(order)
+    )
+    manifest = materialize_manifest(proposal, request, list(order))
+    return ArtDirectionManifest(
+        sources=manifest.sources,
+        regions=manifest.regions,
+        layout_treatment=manifest.layout_treatment,
+        pairing_order=manifest.pairing_order,
+        processing_intent=ProcessingIntent(upscale_warning=True),
+    )
+
+
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+def test_packed_render_is_byte_identical_on_repeat(target) -> None:
+    """R046's bar: identical sources and weights, identical bytes — at both targets."""
+    src, order = _packed_sources(5)
+    m = _weighted_packed_manifest(order, [0.91, 0.72, 0.70, 0.68, 0.51])
+    first = renderer.render(m, src, target)
+    second = renderer.render(m, src, target)
+    assert first.sha256 == second.sha256
+    assert renderer.render_bytes(m, src, target) == renderer.render_bytes(
+        m, src, target
+    )
+    assert (first.target_width, first.target_height) == target
+
+
+def test_a_1080p_packed_manifest_tiles_a_4k_canvas() -> None:
+    """Cross-target correctness: cells are repacked for 4K, not left in a quadrant.
+
+    The automated proof is ``ArtifactValidator`` over the *resolved* 4K cells —
+    every cell in bounds, above one output pixel, and pairwise disjoint — rather
+    than an eyeball of the render.
+    """
+    from curator.artdirection.packing import resolve_regions
+    from curator.render.validate import ArtifactValidator
+
+    src, order = _packed_sources(5)
+    m = _weighted_packed_manifest(order, [0.91, 0.72, 0.70, 0.68, 0.51])
+    # Materialized at 1080p: its stored cells do not tile 3840x2160.
+    assert max(r.x + r.w for r in m.regions) == 1920
+
+    uhd = (3840, 2160)
+    payload = renderer.render_bytes(m, src, uhd)
+    regions = resolve_regions(m, uhd)
+    assert max(r.x + r.w for r in regions) == 3840
+    assert max(r.y + r.h for r in regions) == 2160
+
+    report = ArtifactValidator().validate(
+        payload, sha256_hex(payload), uhd, source_regions=regions
+    )
+    assert report.publishable is True
+    for check in report.checks:
+        assert check.passed is True, (check.name, check.reason)
+    names = {check.name for check in report.checks}
+    assert "source_regions_disjoint" in names
+    assert {f"source_region[{i}]" for i in range(5)} <= names
+
+
 def test_packed_over_the_cap_is_rejected_before_any_decode() -> None:
     """The cap fires in validate(), _render's first statement — zero Pillow work.
 

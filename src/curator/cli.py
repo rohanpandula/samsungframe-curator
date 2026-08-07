@@ -16,13 +16,16 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                the explicit-unsupported (RAW) / corrupt failure surfaces.
 - ``curator propose ASSET...`` — rank art-direction treatments for one or more cataloged
                                assets (M010/S02): the single-source treatments plus, when the
-                               group coheres, ``diptych`` at two assets, ``triptych`` at three
-                               and ``quad`` at four. Over ``MAX_LAYOUT_SOURCES`` assets is a
-                               fatal exit 2 — rejected, never truncated.
+                               group coheres, ``diptych`` at two assets, ``triptych`` at three,
+                               ``quad`` at four and ``packed`` at any count up to the cap
+                               (M010/S03), whose cells are sized by ``--weights`` or by each
+                               asset's aesthetic quality. Over ``MAX_LAYOUT_SOURCES`` assets is
+                               a fatal exit 2 — rejected, never truncated.
 - ``curator manifest ASSET...`` — build an Art Direction Manifest over one or more cataloged
                                assets, optionally selecting ``--treatment`` (``diptych`` /
-                               ``triptych`` / ``quad`` included) and resolving it for
-                               ``--target``; the manifest carries one real cell per source.
+                               ``triptych`` / ``quad`` / ``packed`` included) and resolving it
+                               for ``--target``; the manifest carries one real cell per source,
+                               packed with the weights the chosen proposal recorded.
 - ``curator render SOURCE``   — render an art-direction manifest (``.json``) or a media
                                asset to a target (named ``1080p``/``4k`` or ``WxH``) via the
                                deterministic renderer, printing a summary or ``--json`` result.
@@ -131,6 +134,7 @@ from curator.artdirection.manifest import (
     _TREATMENT_SOURCE_COUNT,
     MANIFEST_VERSION,
     MAX_LAYOUT_SOURCES,
+    MULTI_CELL_TREATMENTS,
     ArtDirectionManifest,
     LayoutTreatment,
     SourceRegion,
@@ -326,6 +330,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"render target (default: {DEFAULT_TARGET})",
     )
     propose.add_argument(
+        "--weights",
+        help=(
+            "comma-separated importance weights, one per asset in the same "
+            "order, sizing the packed layout's cells (default: each asset's "
+            "analyzed aesthetic quality)"
+        ),
+    )
+    propose.add_argument(
         "--json",
         action="store_true",
         help="emit the ranked proposals as structured JSON",
@@ -341,8 +353,10 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument(
         "--treatment",
         help=(
-            "select a specific treatment from the assets' proposals "
-            "(e.g. single_fullbleed, diptych, triptych, quad)"
+            "select a specific treatment from the assets' proposals: "
+            "single_fullbleed, contain_matte, panoramic, square, diptych, "
+            "triptych, quad, packed (packed lays out any 2-9 assets, sized by "
+            "the weights the proposal recorded)"
         ),
     )
     manifest.add_argument(
@@ -975,6 +989,35 @@ def _asset_paths(assets: list[str] | str, command: str) -> list[Path]:
     return paths
 
 
+def _parse_weights(raw: str | None, count: int) -> list[float] | None:
+    """Parse ``propose --weights`` into one float per asset (M010/S03).
+
+    Returns ``None`` when the flag was not given, so the policy engine falls back
+    to its default weight source. A count mismatch or an unparseable value is a
+    fatal :class:`CuratorError` (exit 2) naming what was wrong — never a padded,
+    truncated or silently-dropped weight vector, which would produce a layout the
+    caller did not ask for.
+    """
+    if raw is None:
+        return None
+    weights: list[float] = []
+    for chunk in raw.split(","):
+        text = chunk.strip()
+        try:
+            weights.append(float(text))
+        except ValueError:
+            raise CuratorError(
+                f"--weights value is not a number: {text!r} — pass one "
+                f"comma-separated weight per asset (e.g. --weights 0.9,0.4,0.4)"
+            ) from None
+    if len(weights) != count:
+        raise CuratorError(
+            f"--weights has {len(weights)} value(s) for {count} asset(s) — pass "
+            f"one weight per asset, in the same order"
+        )
+    return weights
+
+
 def _resolve_assets(paths: list[Path]) -> tuple[Catalog, list[int], list[str]]:
     """Return the catalog entry ids for *paths* plus the one owning :class:`Catalog`.
 
@@ -1067,14 +1110,22 @@ def _propose(args: argparse.Namespace) -> int:
     are recorded against ``entry_ids[0]``, extending the precedent
     ``api._record_render`` already set for the renders journal. The manifest JSON
     itself carries every source, so no junction table is needed.
+
+    ``--weights`` (M010/S03) overrides the packed layout's default per-source
+    importance. It is validated against the asset count *before* any catalog or
+    analysis work, and travels in ``request.context`` so the policy engine can
+    record it in the proposal's evidence — which is what makes a later
+    ``curator manifest`` reproduce the same geometry.
     """
     paths = _asset_paths(args.asset, "propose")
     width, height = _target_dims(args.target)
+    weights = _parse_weights(getattr(args, "weights", None), len(paths))
     request = ArtDirectionRequest(
         target=args.target,
         target_width=width,
         target_height=height,
         sources=[str(path) for path in paths],
+        context={} if weights is None else {"weights": weights},
     )
     catalog, entry_ids, sources = _resolve_assets(paths)
     try:
@@ -1164,12 +1215,21 @@ def _select_proposal(
 def _lays_out(treatment: LayoutTreatment, source_count: int) -> bool:
     """True when *treatment* can lay out exactly *source_count* sources.
 
-    A treatment with no entry in ``_TREATMENT_SOURCE_COUNT`` has no fixed width
-    (the single-source treatments render the primary; M010/S03's ``packed`` is
-    variable by design), so only the named fixed-size templates are constrained.
+    A treatment with no entry in ``_TREATMENT_SOURCE_COUNT`` has no fixed width.
+    That splits two ways: the single-source treatments render the primary and are
+    unconstrained, while M010/S03's ``packed`` is variable *within a range* — it
+    is a multi-cell treatment, so it needs at least two sources and at most
+    :data:`MAX_LAYOUT_SOURCES`, exactly the bound ``renderer._multi_cell``
+    enforces. Without that, a ``packed`` proposal persisted from a five-asset
+    ``propose`` would be selected for a later single-asset ``manifest`` and then
+    rejected by the materializer — a correct error about the wrong thing.
     """
     required = _TREATMENT_SOURCE_COUNT.get(treatment)
-    return required is None or required == source_count
+    if required is not None:
+        return required == source_count
+    if treatment in MULTI_CELL_TREATMENTS:
+        return 2 <= source_count <= MAX_LAYOUT_SOURCES
+    return True
 
 
 def _load_proposals(

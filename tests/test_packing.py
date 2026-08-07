@@ -471,3 +471,26 @@ def test_unsplittable_box_raises_for_weighted_items_too() -> None:
     with pytest.raises(PackingError) as exc:
         slice_cells(weighted(1.0, 1.0), Cell(0, 0, 30, 30), gap=33)
     assert "cannot split" in str(exc.value)
+
+
+# -- R046: determinism at both targets, not just one --------------------------
+
+
+@pytest.mark.parametrize("target", [LANDSCAPE, UHD])
+@pytest.mark.parametrize("count", [2, 3, 5, 9])
+def test_weighted_geometry_is_identical_on_repeat_at_both_targets(
+    count: int, target: tuple[int, int]
+) -> None:
+    """Identical sources and weights produce identical geometry, at 1080p *and* 4K.
+
+    A determinism check at one resolution cannot catch per-cell rounding drift
+    that only shows at the other (01-RESEARCH.md Pitfall 8), so both are asserted
+    here rather than one standing in for the pair.
+    """
+    items = weights_for("descending", count)
+    box = Cell(0, 0, *target)
+    gap = gutter_for_target(target)
+    first = slice_cells(items, box, gap=gap)
+    second = slice_cells(items, box, gap=gap)
+    assert first == second
+    assert boxes(first) == boxes(second)
