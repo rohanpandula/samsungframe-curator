@@ -1353,9 +1353,11 @@ def _select_proposal(
 
     Prefers an already-persisted proposal (matching *treatment* when given), else
     falls back to running the policy engine over every asset (persisting its
-    output). Candidates whose named template cannot lay out exactly
-    ``len(sources)`` sources are skipped rather than selected and then rejected
-    by :func:`materialize_manifest` — a diptych is not an answer to three assets.
+    output). Candidates that cannot lay out exactly ``len(sources)`` sources are
+    skipped rather than selected and then rejected by
+    :func:`materialize_manifest` — a diptych is not an answer to three assets,
+    and a ``packed`` row persisted from a different source count is not an
+    answer to this one (:func:`_row_lays_out`).
     Raises :class:`CuratorError` when no proposal can be produced.
     """
     entry_id = entry_ids[0]
@@ -1364,7 +1366,7 @@ def _select_proposal(
         fresh = _analyze_all_or_reuse(catalog, entry_ids, sources, request)
         _persist_proposals(catalog, entry_id, fresh)
         rows = _load_proposals(catalog, entry_id, treatment)
-    usable = [row for row in rows if _lays_out(row.treatment, len(sources))]
+    usable = [row for row in rows if _row_lays_out(row, len(sources))]
     if not usable:
         raise CuratorError(
             f"no proposal available to manifest {len(sources)} source(s) for "
@@ -1399,6 +1401,38 @@ def _lays_out(treatment: LayoutTreatment, source_count: int) -> bool:
     if treatment in MULTI_CELL_TREATMENTS:
         return 2 <= source_count <= MAX_LAYOUT_SOURCES
     return source_count == 1
+
+
+def _row_lays_out(proposal: TreatmentProposal, source_count: int) -> bool:
+    """True when this specific persisted *proposal* row can lay out *source_count* sources.
+
+    :func:`_lays_out` answers for the treatment *class*; this answers for the
+    row. The distinction only matters for a variable-width treatment (PACKED —
+    any multi-cell treatment without a ``_TREATMENT_SOURCE_COUNT`` entry):
+    repeated ``propose`` runs against the same primary asset at different
+    source counts each persist a ``packed`` row ("the primary source owns the
+    row"), every one of them passes the class-level range check, and
+    ``_load_proposals``'s ``ORDER BY score DESC, id`` breaks a score tie toward
+    the *oldest* row — so ``curator manifest --treatment packed`` could select
+    a stale row whose recorded weights cannot cover the current request and be
+    rejected by ``materialize_manifest`` with a technically-true but misleading
+    count-mismatch error (M010 review follow-up, 10-VERIFICATION.md Additional
+    Finding). A row that records ``evidence["weights"]`` is therefore usable
+    only when it recorded exactly one weight per requested source — the same
+    exact-count discipline ``_TREATMENT_SOURCE_COUNT`` gives fixed-width
+    templates. A row with no recorded weights packs uniformly at any width
+    (M010/S01 behavior) and stays usable.
+    """
+    if not _lays_out(proposal.treatment, source_count):
+        return False
+    if (
+        proposal.treatment in MULTI_CELL_TREATMENTS
+        and _TREATMENT_SOURCE_COUNT.get(proposal.treatment) is None
+    ):
+        weights = proposal.evidence.get("weights")
+        if isinstance(weights, list) and len(weights) != source_count:
+            return False
+    return True
 
 
 def _load_proposals(

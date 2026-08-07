@@ -397,3 +397,40 @@ def test_manifest_of_one_asset_ignores_a_packed_proposal(data_root, tmp_path, ca
     document = _json_out(capsys)
     assert document["layout_treatment"] != "packed"
     assert len(document["regions"]) == 1
+
+
+def test_manifest_packed_skips_a_stale_smaller_proposal(data_root, tmp_path, capsys):
+    """A packed row persisted at N=2 is not an answer to a later N=5 manifest.
+
+    Repeated ``propose`` runs against the same primary asset each persist a
+    ``packed`` row ("the primary source owns the row"), and ``_load_proposals``
+    breaks a score tie toward the oldest id — so before the M010 review
+    follow-up fix, ``manifest --treatment packed`` at N=5 selected the stale
+    2-weight row and was rejected by ``materialize_manifest`` with a confusing
+    count-mismatch error. Selection must instead skip any variable-width row
+    whose own recorded weights cannot cover the current request
+    (10-VERIFICATION.md, Additional Finding).
+    """
+    assets = _kin_folder(tmp_path, 5)
+    capsys.readouterr()
+
+    # Older, smaller propose against the same primary: persists a 2-weight
+    # packed row with a lower rowid than anything persisted after it.
+    assert cli.main(["propose", assets[0], assets[1], "--json"]) == 0
+    assert "packed" in _treatments(_json_out(capsys))
+
+    # Fresh five-asset propose: persists the 5-weight packed row this
+    # manifest request actually needs.
+    assert cli.main(["propose", *assets, "--json"]) == 0
+    cells = _packed(_json_out(capsys))["evidence"]["cells"]
+
+    assert cli.main(["manifest", *assets, "--treatment", "packed", "--json"]) == 0
+    document = _json_out(capsys)
+    assert document["layout_treatment"] == "packed"
+    regions = document["regions"]
+    assert len(regions) == 5
+    # The fresh row was selected, not merely *a* row: geometry matches the
+    # five-asset propose's own recorded cells exactly.
+    assert [(r["source_sha256"], r["x"], r["y"], r["w"], r["h"]) for r in regions] == [
+        (c["sha"], c["x"], c["y"], c["w"], c["h"]) for c in cells
+    ]
