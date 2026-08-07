@@ -14,6 +14,7 @@ from curator.artdirection.manifest import (
     LayoutTreatment,
     ManifestError,
     ProcessingIntent,
+    SourceRegion,
 )
 from curator.hashing import sha256_hex
 from curator.render.renderer import (
@@ -785,6 +786,56 @@ def test_the_same_cell_letterboxed_does_not_trip_the_upscale_gate(target) -> Non
     order = [sha, *order]
     m = _fit_manifest(LayoutTreatment.QUAD, order, [None, None, None, None], target=target)
     assert renderer.render(m, src, target).upscaled_warning is False
+
+
+def test_multi_cell_rejects_non_positive_region_extent_as_render_error() -> None:
+    """CR-02: defense in depth at the render boundary itself.
+
+    ``ArtDirectionManifest.validate()`` now rejects a negative/zero-extent *set*
+    region before ``_render`` ever reaches this loop (``_render`` calls
+    ``manifest.validate()`` as its first statement), so this exercises
+    ``_multi_cell`` directly — the only way left to reach the code path — to
+    prove the render boundary itself still refuses a non-positive cell as a
+    typed ``RenderError`` rather than letting PIL's crop() raise a bare
+    ``ValueError: Coordinate 'right' is less than 'left'`` (the review's exact
+    unhandled-500 reproduction against the unmodified renderer).
+    """
+    from curator.render.renderer import _multi_cell
+
+    (sha_a, dat_a), (sha_b, dat_b) = _diptych_sources()
+    m = ArtDirectionManifest(
+        sources=[sha_a, sha_b],
+        regions=[
+            SourceRegion(source_sha256=sha_a, x=1920, y=0, w=-1920, h=1080, crop="fill"),
+            SourceRegion(source_sha256=sha_b, x=0, y=0, w=1920, h=1080),
+        ],
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=[sha_a, sha_b],
+    )
+    with pytest.raises(RenderError) as excinfo:
+        _multi_cell({sha_a: dat_a, sha_b: dat_b}, m, (1920, 1080))
+    message = str(excinfo.value)
+    assert "non-positive extent" in message
+    assert sha_a in message
+
+
+def test_render_rejects_a_negative_width_region_manifest_before_any_pixel_work() -> None:
+    """The primary fix closes the path end to end through the public API too:
+    ``DeterministicRenderer.render`` now raises ``ManifestError`` (via its own
+    ``manifest.validate()`` call), never the bare ``ValueError`` the review
+    reproduced directly against the unmodified renderer."""
+    (sha_a, dat_a), (sha_b, dat_b) = _diptych_sources()
+    m = ArtDirectionManifest(
+        sources=[sha_a, sha_b],
+        regions=[
+            SourceRegion(source_sha256=sha_a, x=1920, y=0, w=-1920, h=1080, crop="fill"),
+            SourceRegion(source_sha256=sha_b, x=0, y=0, w=1920, h=1080),
+        ],
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=[sha_a, sha_b],
+    )
+    with pytest.raises(ManifestError):
+        renderer.render(m, {sha_a: dat_a, sha_b: dat_b}, (1920, 1080))
 
 
 def test_an_unrecognized_crop_mode_is_rejected_by_name() -> None:

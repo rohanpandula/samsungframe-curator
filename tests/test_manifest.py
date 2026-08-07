@@ -162,6 +162,62 @@ def test_all_zero_regions_still_validate() -> None:
     assert all(r.is_unset for r in m.regions)
 
 
+def test_negative_width_region_raises() -> None:
+    """CR-02: a *set* region with negative width is rejected, not passed through
+    to the renderer's crop-fill path as a bare (uncaught) ValueError.
+
+    Mirrors the review's reproduction exactly: two regions that "tile" the
+    target by bounding-box math alone (``x + w`` for the negative-width region
+    is 0, contributing nothing to the max), even though the first region is not
+    a legitimate paste box.
+    """
+    m = ArtDirectionManifest(
+        sources=["a", "b"],
+        regions=[
+            SourceRegion(source_sha256="a", x=1920, y=0, w=-1920, h=1080, crop="fill"),
+            SourceRegion(source_sha256="b", x=0, y=0, w=1920, h=1080),
+        ],
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=["a", "b"],
+    )
+    with pytest.raises(ManifestError) as exc:
+        m.validate()
+    message = str(exc.value)
+    assert "'a'" in message
+    assert "invalid geometry" in message
+
+
+def test_zero_width_region_raises() -> None:
+    """A zero-width *set* region (not the all-zero unset sentinel) is rejected
+    too — the milder sibling case that used to silently mis-render a 1px sliver
+    at a slightly negative offset instead of raising at all."""
+    m = ArtDirectionManifest(
+        sources=["a", "b"],
+        regions=[
+            SourceRegion(source_sha256="a", x=100, y=0, w=0, h=1080),
+            SourceRegion(source_sha256="b", x=0, y=0, w=1920, h=1080),
+        ],
+    )
+    with pytest.raises(ManifestError) as exc:
+        m.validate()
+    assert "invalid geometry" in str(exc.value)
+
+
+def test_positive_regions_still_validate() -> None:
+    """A well-formed, non-unset region set is unaffected by the new check."""
+    from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
+
+    shas = ["a", "b"]
+    target = (1920, 1080)
+    m = ArtDirectionManifest(
+        sources=shas,
+        regions=equal_cells(shas, Cell(0, 0, *target), gap=gutter_for_target(target)),
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=shas,
+    )
+    m.validate()
+
+
 def test_is_unset_distinguishes_declared_geometry() -> None:
     """All-zero means 'no geometry declared'; any non-zero extent means set."""
     assert SourceRegion(source_sha256="a").is_unset is True

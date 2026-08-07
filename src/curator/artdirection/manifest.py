@@ -238,7 +238,13 @@ class ArtDirectionManifest:
         actually in ``sources``. Regions are deliberately *not* required to be
         uniformly set or uniformly unset — resolving a partially-populated
         manifest is render-time work (``packing.resolve_regions``), not a data
-        model rule. Unknown *override* fields are rejected later by
+        model rule. A *set* region (:attr:`SourceRegion.is_unset` is False) must
+        still have a legitimate paste box — non-negative origin and positive
+        extent (CR-02) — because neither this method nor
+        ``packing.resolve_regions`` re-derives geometry it finds already stored;
+        an unvalidated negative width/height reaches the renderer's crop-fill
+        path as a bare ``ValueError`` (a zero extent mis-renders silently
+        instead). Unknown *override* fields are rejected later by
         :meth:`resolved_for`.
         """
         if str(self.manifest_version) != MANIFEST_VERSION:
@@ -269,6 +275,15 @@ class ArtDirectionManifest:
                 raise ManifestError(
                     f"region references source(s) not in manifest: {unknown}"
                 )
+            for region in self.regions:
+                if region.is_unset:
+                    continue
+                if region.w <= 0 or region.h <= 0 or region.x < 0 or region.y < 0:
+                    raise ManifestError(
+                        f"region for {region.source_sha256!r} has invalid geometry "
+                        f"(x={region.x}, y={region.y}, w={region.w}, h={region.h}) — "
+                        f"a set region must have non-negative origin and positive extent"
+                    )
         for target, overrides in self.target_overrides.items():
             if not isinstance(target, str):
                 raise ManifestError(

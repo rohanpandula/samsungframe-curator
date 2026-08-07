@@ -369,6 +369,18 @@ def _multi_cell(
         img, sw, sh = _open_rgb(sources[region.source_sha256])
         cell_x, cell_y = int(region.x), int(region.y)
         cell_w, cell_h = int(region.w), int(region.h)
+        if cell_w <= 0 or cell_h <= 0:
+            # CR-02: defense in depth. `ArtDirectionManifest.validate()` rejects
+            # this for a manifest that reaches it, but `_render` is the only
+            # caller that validates — a non-positive cell reaching this loop by
+            # any other path (a future caller, a validate() bypassed on purpose)
+            # would otherwise hit PIL's crop() with `right < left` and raise a
+            # bare ValueError, not a RenderError, breaking every caller's
+            # (POST /api/render, `curator render`) documented 400/exit-2 contract.
+            raise RenderError(
+                f"region for {region.source_sha256!r} has non-positive extent "
+                f"(w={cell_w}, h={cell_h})"
+            )
         mode = region.crop
         if not mode:
             # The default, and every manifest written before M010/S05.
