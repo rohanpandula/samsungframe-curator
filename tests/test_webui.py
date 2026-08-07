@@ -359,6 +359,50 @@ def test_webui_propose_four_sources_ranks_a_quad(client, catalog):
     assert len(quad["evidence"]["cells"]) == 4
 
 
+def test_webui_propose_keeps_crop_safety_attribution_when_primary_reappears_midlist(
+    client, catalog, monkeypatch
+):
+    """CR-03: a primary sha present but not first in ``sources`` must not desync
+    ``results`` from ``art_request.sources`` — otherwise a cell's crop-safety
+    verdict is attributed to the wrong image's sha in the returned evidence.
+
+    Mirrors the review's reproduction: ``asset`` names the sha of a genuinely
+    crop-*risky* source, which is also present (not first) inside ``sources``
+    alongside two crop-*safe* ones. ``LocalAnalysisProvider.analyze`` is
+    monkeypatched to return canned, deterministic fixtures keyed by the
+    ``asset_id`` the handler passes it, isolating this test to the handler's own
+    source-ordering bug rather than real per-pixel crop-safety heuristics.
+    """
+    import curator.api as api_module
+    from analysis_factory import crop_risky_result, crop_safe_result
+
+    sha_x = catalog.content.put(_png(1600, 1200, (10, 10, 10)))
+    sha_a = catalog.content.put(_png(1600, 1200, (20, 20, 20)))
+    sha_b = catalog.content.put(_png(1600, 1200, (30, 30, 30)))
+    fixtures = {
+        sha_x: crop_risky_result(sha_x),
+        sha_a: crop_safe_result(sha_a),
+        sha_b: crop_safe_result(sha_b),
+    }
+
+    def fake_analyze(self, source, profile=None, asset_id=None):
+        return fixtures[asset_id]
+
+    monkeypatch.setattr(api_module.LocalAnalysisProvider, "analyze", fake_analyze)
+
+    resp = client.post(
+        "/api/propose",
+        json={"asset": sha_x, "sources": [sha_a, sha_x, sha_b], "target": "1080p"},
+    )
+    assert resp.status_code == 200
+    packed = next(p for p in resp.json() if p["treatment"] == "packed")
+    cells = {cell["sha"]: cell for cell in packed["evidence"]["cells"]}
+    assert set(cells) == {sha_a, sha_x, sha_b}
+    assert cells[sha_a]["crop_safe"] is True
+    assert cells[sha_x]["crop_safe"] is False
+    assert cells[sha_b]["crop_safe"] is True
+
+
 def test_webui_render_over_cap_manifest_is_400_before_any_fetch(client):
     """An over-cap manifest is rejected before a single blob is read.
 

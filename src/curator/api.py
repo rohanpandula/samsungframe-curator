@@ -573,7 +573,6 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         """
         catalog = _catalog(request)
         provider = LocalAnalysisProvider()
-        results = []
         sources_sha = list(body.sources)
         primary_sha = None
         primary_data: bytes | None = None
@@ -593,20 +592,28 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
                         f"request is rejected, never truncated"
                     ),
                 )
+            # CR-03: build `results` keyed by sha, then read it back out in
+            # exactly `sources_sha` order — never "primary first, then the
+            # rest". `propose_treatments`'s diptych/triptych/quad/packed blocks
+            # zip `results[i]` against `art_request.sources[i]` positionally, so
+            # when the caller's JSON body names the primary sha *inside*
+            # `sources` at an index other than 0, "primary first" desyncs the
+            # two lists and a cell's crop-safety verdict gets attributed to the
+            # wrong image's sha in the returned evidence.
+            analyzed: dict[str, AnalysisResult] = {}
             if primary_data is not None and primary_sha is not None:
-                results.append(
-                    provider.analyze(
-                        primary_data, AnalysisProfile.BALANCED, asset_id=primary_sha
-                    )
+                analyzed[primary_sha] = provider.analyze(
+                    primary_data, AnalysisProfile.BALANCED, asset_id=primary_sha
                 )
-            for other in [s for s in sources_sha if s != primary_sha]:
-                results.append(
-                    provider.analyze(
-                        _fetch(catalog.content, other),
-                        AnalysisProfile.BALANCED,
-                        asset_id=other,
-                    )
+            for other in sources_sha:
+                if other in analyzed:
+                    continue
+                analyzed[other] = provider.analyze(
+                    _fetch(catalog.content, other),
+                    AnalysisProfile.BALANCED,
+                    asset_id=other,
                 )
+            results = [analyzed[sha] for sha in sources_sha]
         except AnalysisError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         target = _parse_target(body.target, body.target_width, body.target_height)
