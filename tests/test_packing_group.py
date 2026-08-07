@@ -19,15 +19,23 @@ fabricated group.
 from __future__ import annotations
 
 import ast
+import io
 import json
 import math
 from pathlib import Path
 
 import numpy as np
 import pytest
+from fastapi.testclient import TestClient
+from PIL import Image, ImageDraw
 
+from acceptance_harness import run_cli
+from curator import cli
+from curator.api import create_app
 from curator.artdirection.manifest import MAX_LAYOUT_SOURCES
 from curator.catalog import Catalog
+from curator.cli import EXIT_FATAL, EXIT_NO_CHANGE, EXIT_OK
+from curator.connectors.local import LocalConnector
 from curator.taste.embedding.grouping import (
     AFFINITY_SOURCE,
     GROUP_SIMILARITY_THRESHOLD,
@@ -35,12 +43,15 @@ from curator.taste.embedding.grouping import (
     GroupCandidate,
     GroupingError,
     GroupSelection,
+    resolve_group_pool,
     select_group,
 )
-from curator.taste.embedding.provider import EMBEDDING_DIM
+from curator.taste.embedding.provider import EMBEDDING_DIM, EMBEDDING_MODEL_VERSION
 from curator.taste.embedding.store import EmbeddingStore
 
 MODEL_VERSION = "v1"
+
+FIXTURE_MODEL = Path(__file__).parent / "fixtures" / "tiny_embedding_model.onnx"
 
 
 @pytest.fixture
@@ -556,3 +567,345 @@ def test_artdirection_imports_nothing_from_taste_or_embedding() -> None:
                 if "taste" in name or "embedding" in name:
                     offenders.append(f"{module.name}: {name}")
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# resolve_group_pool: the module's only database access, bounded by SQL
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_group_pool_returns_the_pool_and_its_entry_ids(catalog, store) -> None:
+    shas = [_sha(marker) for marker in "abc"]
+    for sha in shas:
+        _register_content(catalog, sha)
+        store.set(sha, MODEL_VERSION, _unit(0))
+    entry_ids = {sha: _catalog_entry(catalog, sha) for sha in shas}
+
+    pool, mapping = resolve_group_pool(catalog, MODEL_VERSION)
+
+    assert set(pool) == set(shas)
+    assert mapping == entry_ids
+
+
+def test_resolve_group_pool_skips_other_model_versions(catalog, store) -> None:
+    current, other = _sha("a"), _sha("b")
+    for sha in (current, other):
+        _register_content(catalog, sha)
+        _catalog_entry(catalog, sha)
+    store.set(current, MODEL_VERSION, _unit(0))
+    store.set(other, "a-different-checkpoint", _unit(0))
+
+    pool, mapping = resolve_group_pool(catalog, MODEL_VERSION)
+
+    assert pool == [current]
+    assert other not in mapping
+
+
+def test_resolve_group_pool_applies_the_limit_most_recent_first(catalog, store) -> None:
+    shas = [_sha(marker) for marker in "abc"]
+    ids = {}
+    for sha in shas:
+        _register_content(catalog, sha)
+        store.set(sha, MODEL_VERSION, _unit(0))
+        ids[sha] = _catalog_entry(catalog, sha)
+
+    pool, mapping = resolve_group_pool(catalog, MODEL_VERSION, limit=2)
+
+    assert len(pool) == 2
+    # The two highest catalog_entries.id rows — most recently cataloged first.
+    assert set(pool) == {shas[-1], shas[-2]}
+    assert mapping[shas[-1]] == ids[shas[-1]]
+
+
+def test_resolve_group_pool_never_exceeds_the_grouping_bound(catalog) -> None:
+    """The SQL ``LIMIT`` carries the same bound ``select_group`` enforces, so no
+    surface can ask the database for a pool grouping would then refuse."""
+    with pytest.raises(GroupingError) as excinfo:
+        resolve_group_pool(catalog, MODEL_VERSION, limit=MAX_CANDIDATE_POOL + 1)
+
+    assert str(MAX_CANDIDATE_POOL) in str(excinfo.value)
+    assert "never" in str(excinfo.value)
+
+
+def test_resolve_group_pool_rejects_a_non_positive_limit(catalog) -> None:
+    with pytest.raises(GroupingError):
+        resolve_group_pool(catalog, MODEL_VERSION, limit=0)
+
+
+# ---------------------------------------------------------------------------
+# The two surfaces: `curator group` and POST /api/packing/group
+# ---------------------------------------------------------------------------
+
+
+def _use_fixture_model(monkeypatch) -> None:
+    """Point the provider at the tiny committed ONNX fixture (never a download)."""
+    monkeypatch.setenv("CURATOR_TASTE_EMBEDDING_MODEL_PATH", str(FIXTURE_MODEL))
+
+
+def _no_model(monkeypatch) -> None:
+    """Leave the isolated data root's model path empty — the honest-degradation case."""
+    monkeypatch.delenv("CURATOR_TASTE_EMBEDDING_MODEL_PATH", raising=False)
+
+
+def _frame_bytes(shift: int) -> bytes:
+    """One near-kin frame: same composition, mean colour shifted by *shift*.
+
+    Square so CLIP's center crop keeps the whole composition — the fixture model
+    is a global average pool, so the frames' embeddings differ exactly as much as
+    their mean colour does (measured cosine 0.93-0.99 across shifts 0..24).
+    """
+    img = Image.new("RGB", (800, 800), (60 + shift, 90, 170))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([200, 200, 600, 600], fill=(210, 180, 60 + shift))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _unrelated_bytes() -> bytes:
+    """A frame with a deliberately different mean colour (measured cosine -0.04)."""
+    buf = io.BytesIO()
+    Image.new("RGB", (800, 800), (10, 220, 30)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _catalog_entry(catalog: Catalog, sha: str) -> int:
+    """Register a catalog entry for an already-inserted ``content`` row."""
+    connector_id = "grouping-fixture"
+    catalog.db.execute(
+        "INSERT OR IGNORE INTO source_connectors(connector_id, connector_type, name)"
+        " VALUES (?, 'local', 'grouping fixture')",
+        (connector_id,),
+    )
+    cursor = catalog.db.execute(
+        "INSERT INTO catalog_entries(connector_id, asset_id, revision, sha256)"
+        " VALUES (?, ?, '1', ?)",
+        (connector_id, f"asset-{sha[:8]}", sha),
+    )
+    catalog.db.commit()
+    return int(cursor.lastrowid or 0)
+
+
+def _write_asset(catalog: Catalog, tmp_path, name: str, data: bytes) -> tuple[str, str]:
+    """Write *data* to a file, catalog it, and return ``(resolved path, sha256)``."""
+    folder = tmp_path / "frames"
+    folder.mkdir(exist_ok=True)
+    asset = folder / name
+    asset.write_bytes(data)
+    connector = LocalConnector(folder)
+    sha = catalog.add_source(connector.connector_id, str(asset.resolve()), data)
+    return str(asset.resolve()), sha
+
+
+def _seeded_surface(catalog, tmp_path):
+    """Catalog three assets and store hand-built vectors under the real model version.
+
+    Returns ``(seed_path, seed_sha, close_sha, weak_sha)``. Hand-built rather than
+    inferred so the cosines are exact: ``close`` at 0.95 clears the default
+    threshold and ``weak`` at 0.2 does not.
+    """
+    store = EmbeddingStore(catalog)
+    seed_path, seed_sha = _write_asset(catalog, tmp_path, "seed.png", _frame_bytes(0))
+    _, close_sha = _write_asset(catalog, tmp_path, "close.png", _frame_bytes(8))
+    _, weak_sha = _write_asset(catalog, tmp_path, "weak.png", _unrelated_bytes())
+    store.set(seed_sha, EMBEDDING_MODEL_VERSION, _unit(0))
+    store.set(close_sha, EMBEDDING_MODEL_VERSION, _at_cosine(0.95))
+    store.set(weak_sha, EMBEDDING_MODEL_VERSION, _at_cosine(0.2))
+    return seed_path, seed_sha, close_sha, weak_sha
+
+
+def test_cli_group_returns_a_group_and_exits_zero(data_root, tmp_path, catalog, monkeypatch):
+    _use_fixture_model(monkeypatch)
+    seed_path, seed_sha, close_sha, weak_sha = _seeded_surface(catalog, tmp_path)
+
+    rc, out = run_cli(["group", seed_path, "--size", "3", "--json"])
+
+    assert rc == EXIT_OK
+    payload = json.loads(out)
+    assert payload["available"] is True
+    assert payload["seed_sha256"] == seed_sha
+    assert [m["sha256"] for m in payload["members"]] == [close_sha]
+    assert payload["evidence"]["affinity_source"] == "embedding_cosine"
+    # The rejected candidate is still reported — what was passed over is visible.
+    assert weak_sha in payload["evidence"]["pairwise_cosine"]
+
+
+def test_cli_group_human_output_names_the_members(data_root, tmp_path, catalog, monkeypatch):
+    _use_fixture_model(monkeypatch)
+    seed_path, seed_sha, close_sha, _weak = _seeded_surface(catalog, tmp_path)
+
+    rc, out = run_cli(["group", seed_path])
+
+    assert rc == EXIT_OK
+    assert seed_sha[:12] in out
+    assert close_sha[:12] in out
+    assert "embedding_cosine" in out
+
+
+def test_cli_group_end_to_end_over_a_real_backfill(data_root, tmp_path, monkeypatch, catalog):
+    """Ingest, embed for real through the fixture ONNX model, then group.
+
+    No hand-seeded vectors anywhere on this path: ``curator taste embed-status
+    --backfill`` computes every vector through the real provider, and the group
+    that comes back is the one those vectors actually imply — the four near-kin
+    frames, with the deliberately unrelated one rejected by the threshold.
+    """
+    _use_fixture_model(monkeypatch)
+    folder = tmp_path / "kin"
+    folder.mkdir()
+    paths = []
+    for index, shift in enumerate((0, 8, 16, 24)):
+        asset = folder / f"frame{index}.png"
+        asset.write_bytes(_frame_bytes(shift))
+        paths.append(str(asset.resolve()))
+    unrelated = folder / "unrelated.png"
+    unrelated.write_bytes(_unrelated_bytes())
+
+    assert run_cli(["ingest", str(folder)])[0] == EXIT_OK
+    assert run_cli(["taste", "embed-status", "--backfill", "--json"])[0] == EXIT_OK
+
+    rc, out = run_cli(["group", paths[0], "--size", "4", "--json"])
+
+    assert rc == EXIT_OK
+    payload = json.loads(out)
+    assert payload["available"] is True
+    assert payload["evidence"]["affinity_source"] == "embedding_cosine"
+    assert payload["evidence"]["selected_group_size"] == 4
+    assert len(payload["members"]) == 3
+    # Descending cosine: the nearest shifts first, the unrelated frame never in.
+    similarities = [m["similarity"] for m in payload["members"]]
+    assert similarities == sorted(similarities, reverse=True)
+    assert all(s >= GROUP_SIMILARITY_THRESHOLD for s in similarities)
+    assert len(payload["evidence"]["pairwise_cosine"]) == 4
+    assert min(payload["evidence"]["pairwise_cosine"].values()) < GROUP_SIMILARITY_THRESHOLD
+
+
+def test_cli_group_with_no_embedding_model_exits_three_naming_propose(
+    data_root, tmp_path, catalog, monkeypatch
+):
+    """The headline honest-degradation case: no model, no group, no crash."""
+    _no_model(monkeypatch)
+    seed_path, _seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+
+    rc, out = run_cli(["group", seed_path, "--size", "4"])
+
+    assert rc == EXIT_NO_CHANGE
+    assert out.strip()
+    assert "curator propose" in out
+    assert "member" not in out
+
+
+def test_cli_group_with_nothing_embedded_yet_exits_three(
+    data_root, tmp_path, catalog, monkeypatch
+):
+    """A model but no vectors: still nothing to propose, still not an error."""
+    _use_fixture_model(monkeypatch)
+    seed_path, _sha256 = _write_asset(catalog, tmp_path, "lonely.png", _frame_bytes(0))
+
+    rc, out = run_cli(["group", seed_path])
+
+    assert rc == EXIT_NO_CHANGE
+    assert "unavailable" in out
+    assert "curator propose" in out
+
+
+def test_cli_group_below_the_threshold_exits_three_without_a_group(
+    data_root, tmp_path, catalog, monkeypatch
+):
+    _use_fixture_model(monkeypatch)
+    seed_path, _seed_sha, close_sha, _weak = _seeded_surface(catalog, tmp_path)
+
+    rc, out = run_cli(["group", seed_path, "--threshold", "0.99"])
+
+    assert rc == EXIT_NO_CHANGE
+    assert "no candidate met the similarity threshold" in out
+    assert close_sha[:12] not in out
+
+
+def test_cli_group_size_over_the_layout_cap_exits_two(
+    data_root, tmp_path, catalog, monkeypatch, capsys
+):
+    """A caller-contract violation is exit 2 — a different thing from "nothing yet"."""
+    _use_fixture_model(monkeypatch)
+    seed_path, _seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+
+    assert cli.main(["group", seed_path, "--size", str(MAX_LAYOUT_SOURCES + 3)]) == EXIT_FATAL
+    assert f"2..{MAX_LAYOUT_SOURCES}" in capsys.readouterr().err
+
+
+def test_cli_group_pool_size_over_the_bound_exits_two(
+    data_root, tmp_path, catalog, monkeypatch, capsys
+):
+    _use_fixture_model(monkeypatch)
+    seed_path, _seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+
+    assert cli.main(["group", seed_path, "--pool-size", "9999"]) == EXIT_FATAL
+    assert str(MAX_CANDIDATE_POOL) in capsys.readouterr().err
+
+
+def test_cli_json_and_api_response_are_equal_dicts(data_root, tmp_path, catalog, monkeypatch):
+    """Both surfaces return the byte-identical shape — the M009 house convention."""
+    _use_fixture_model(monkeypatch)
+    seed_path, seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+
+    rc, out = run_cli(["group", seed_path, "--size", "3", "--json"])
+    assert rc == EXIT_OK
+
+    client = TestClient(create_app(catalog=catalog))
+    response = client.post("/api/packing/group", json={"asset": seed_sha, "size": 3})
+
+    assert response.status_code == 200
+    assert response.json() == json.loads(out)
+
+
+def test_api_group_unavailable_is_a_200_with_available_false(
+    data_root, tmp_path, catalog, monkeypatch
+):
+    """Nothing to group is a normal answer, not an error."""
+    _use_fixture_model(monkeypatch)
+    _path, sha = _write_asset(catalog, tmp_path, "lonely.png", _frame_bytes(0))
+    client = TestClient(create_app(catalog=catalog))
+
+    response = client.post("/api/packing/group", json={"asset": sha})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False
+    assert payload["reason"]
+    assert payload["members"] == []
+
+
+def test_api_group_size_over_the_layout_cap_is_400(data_root, tmp_path, catalog, monkeypatch):
+    _use_fixture_model(monkeypatch)
+    _seed_path, seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+    client = TestClient(create_app(catalog=catalog))
+
+    response = client.post(
+        "/api/packing/group", json={"asset": seed_sha, "size": MAX_LAYOUT_SOURCES + 1}
+    )
+
+    assert response.status_code == 400
+    assert f"2..{MAX_LAYOUT_SOURCES}" in response.json()["detail"]
+
+
+def test_api_group_pool_size_over_the_bound_is_400(data_root, tmp_path, catalog, monkeypatch):
+    _use_fixture_model(monkeypatch)
+    _seed_path, seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+    client = TestClient(create_app(catalog=catalog))
+
+    response = client.post(
+        "/api/packing/group", json={"asset": seed_sha, "pool_size": MAX_CANDIDATE_POOL + 1}
+    )
+
+    assert response.status_code == 400
+
+
+def test_api_group_without_an_embedding_model_is_503(data_root, tmp_path, catalog, monkeypatch):
+    """Mirrors ``/api/taste/embedding-explain``'s posture for the same condition."""
+    _no_model(monkeypatch)
+    _seed_path, seed_sha, _close, _weak = _seeded_surface(catalog, tmp_path)
+    client = TestClient(create_app(catalog=catalog))
+
+    response = client.post("/api/packing/group", json={"asset": seed_sha})
+
+    assert response.status_code == 503

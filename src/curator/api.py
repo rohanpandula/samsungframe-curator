@@ -123,6 +123,13 @@ from curator.taste.dialogue.upstream import (
 from curator.taste.embedding.attribution import attribute_score, find_exemplars, render_rationale
 from curator.taste.embedding.compare import HELD_OUT_FRACTION, compare_heads
 from curator.taste.embedding.errors import EmbeddingError
+from curator.taste.embedding.grouping import (
+    GROUP_SIMILARITY_THRESHOLD,
+    MAX_CANDIDATE_POOL,
+    GroupingError,
+    resolve_group_pool,
+    select_group,
+)
 from curator.taste.embedding.head import VoteVectors, fit_embedding_head, resolve_vote_vectors
 from curator.taste.embedding.provider import OnnxEmbeddingProvider
 from curator.taste.embedding.store import EmbeddingStore
@@ -209,6 +216,27 @@ class ProposeRequest(BaseModel):
                 f"rejected, never truncated"
             )
         return value
+
+
+class GroupRequest(BaseModel):
+    """JSON request body for ``POST /api/packing/group`` (M010/S04).
+
+    The seed comes from ``asset`` (a 64-hex content sha) or ``bytes`` (base64),
+    resolved by the same ``_resolve_image`` every other route uses. ``size`` is
+    the group size **including** the seed, ``pool_size`` bounds the candidate
+    pool, and ``threshold`` is the minimum seed-to-candidate cosine.
+
+    None of the three is bounded here: ``select_group``/``resolve_group_pool``
+    own those contracts (``GroupingError`` -> 400), so this route goes through the
+    exact same single mechanism the CLI does rather than restating a second copy
+    of the bounds that could drift from it.
+    """
+
+    asset: str | None = None
+    bytes: str | None = None
+    size: int = 3
+    pool_size: int = MAX_CANDIDATE_POOL
+    threshold: float = GROUP_SIMILARITY_THRESHOLD
 
 
 class RenderRequest(BaseModel):
@@ -1074,6 +1102,54 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             "contributions": attribution.contributions,
             "exemplars": [e.to_dict() for e in exemplars],
         }
+
+    # -- embedding-affinity group selection (M010/S04) ---------------------------
+
+    @app.post("/api/packing/group")
+    def packing_group(body: GroupRequest, request: Request) -> dict:
+        """Propose which cataloged assets belong together with the seed.
+
+        Answers *which* images to group, never how they are arranged — the
+        geometry stays in :mod:`curator.artdirection`, which imports nothing from
+        ``taste``. Returns the byte-identical JSON shape ``curator group --json``
+        prints (``GroupSelection.to_dict()``), the house convention for a feature
+        that ships on both surfaces.
+
+        An **unavailable** selection — nothing embedded yet, no candidate above
+        the threshold — is a normal ``200`` with ``available: false`` and a
+        ``reason``, not an error: there is nothing wrong, there is just no group
+        to propose. A caller-contract violation (``size`` outside the layout
+        bounds, ``pool_size`` over the grouping bound) is a ``400``, and an
+        unavailable embedding provider a ``503``, mirroring
+        ``/api/taste/embedding-explain``'s posture for the identical condition.
+        """
+        catalog = _catalog(request)
+        _data, sha = _resolve_image(catalog, body.asset, body.bytes)
+        provider = OnnxEmbeddingProvider()
+        probe = provider.probe()
+        if not probe.ok:
+            raise HTTPException(status_code=503, detail=probe.message)
+        # The seed's own entry id, merged in so ``select_group``'s caller-contract
+        # check passes and a seed with no stored vector degrades honestly instead
+        # of raising. It is never surfaced (only *members* carry an id), so a
+        # ``bytes``-only seed that was never cataloged (WR-03) can use -1.
+        seed_entry_id = _entry_id_for_sha(catalog, sha)
+        try:
+            pool, sha_to_entry_id = resolve_group_pool(
+                catalog, provider.model_version, limit=body.pool_size
+            )
+            selection = select_group(
+                sha,
+                pool,
+                {**sha_to_entry_id, sha: seed_entry_id if seed_entry_id is not None else -1},
+                EmbeddingStore(catalog),
+                provider.model_version,
+                group_size=body.size,
+                threshold=body.threshold,
+            )
+        except GroupingError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return selection.to_dict()
 
     # -- head-to-head comparison, with uncertainty (M009/S05) --------------------
 

@@ -58,6 +58,7 @@ from typing import Any
 import numpy as np
 
 from curator.artdirection.manifest import MAX_LAYOUT_SOURCES
+from curator.catalog import Catalog
 from curator.errors import CuratorError
 from curator.taste.embedding.store import EmbeddingStore
 
@@ -390,3 +391,47 @@ def select_group(
             pairwise_cosine=pairwise_cosine,
         ),
     )
+
+
+def resolve_group_pool(
+    catalog: Catalog, model_version: str, *, limit: int = MAX_CANDIDATE_POOL
+) -> tuple[list[str], dict[str, int]]:
+    """Return ``(pool_shas, sha_to_entry_id)`` — the bounded pool :func:`select_group` needs.
+
+    One join from ``catalog_entries`` to ``content_embeddings`` on the content
+    sha, filtered to *model_version*, one row per sha (its highest
+    ``catalog_entries.id``, mirroring the ``ORDER BY id DESC LIMIT 1`` idiom the
+    CLI/API already use to resolve a sha to an entry), most recent first, limited
+    to *limit*.
+
+    **This is the module's only database access**, deliberately isolated in its
+    own function so :func:`select_group` stays a pure numpy operation with no
+    hidden catalog dependency (D025's rule, restated). It follows M009/S01's
+    :func:`~curator.taste.store.resolve_vote_candidates` precedent: a
+    module-level ``resolve_*`` helper taking an explicit :class:`Catalog`, shared
+    by the CLI and the API so "the pool" is defined once rather than per surface.
+
+    *limit* carries the same bound :func:`select_group` enforces (T-10-19): a
+    *limit* outside ``1..MAX_CANDIDATE_POOL`` is a caller-contract violation and
+    raises :class:`GroupingError` here, before the query runs — so no surface can
+    ask the database for a pool the grouping bound would then refuse, and the
+    over-cap request is rejected rather than quietly clamped.
+    """
+    if limit < 1 or limit > MAX_CANDIDATE_POOL:
+        raise GroupingError(
+            f"pool limit {limit} is outside 1..{MAX_CANDIDATE_POOL} — grouping "
+            f"operates on bounded pools only; an over-cap pool is rejected, never "
+            f"truncated"
+        )
+    rows = catalog.db.execute(
+        "SELECT e.sha256, MAX(e.id) AS entry_id"
+        " FROM catalog_entries e"
+        " JOIN content_embeddings c ON c.sha256 = e.sha256"
+        " WHERE c.model_version = ?"
+        " GROUP BY e.sha256"
+        " ORDER BY entry_id DESC"
+        " LIMIT ?",
+        (model_version, limit),
+    ).fetchall()
+    pool = [str(sha) for sha, _ in rows]
+    return pool, {str(sha): int(entry_id) for sha, entry_id in rows}

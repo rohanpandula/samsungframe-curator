@@ -14,6 +14,15 @@ in S04). It exposes a ``catalog`` subcommand group plus the ``ingest`` command:
                                and print a human-readable report of unique clusters, exact/
                                near families, best-original flags with phash distances, and
                                the explicit-unsupported (RAW) / corrupt failure surfaces.
+- ``curator group ASSET``     — propose which cataloged assets belong together with the
+                               seed (M010/S04): the most similar members of a bounded
+                               candidate pool by embedding cosine, with every similarity
+                               it considered cited in the evidence. ``--size`` /
+                               ``--pool-size`` / ``--threshold`` tune it; the resulting
+                               shas are what you hand to ``curator propose``. Exits 3 with
+                               an actionable message — never a fabricated group — when no
+                               embedding model is installed, when nothing is embedded yet,
+                               or when no candidate clears the threshold.
 - ``curator propose ASSET...`` — rank art-direction treatments for one or more cataloged
                                assets (M010/S02): the single-source treatments plus, when the
                                group coheres, ``diptych`` at two assets, ``triptych`` at three,
@@ -184,6 +193,13 @@ from curator.taste.embedding.compare import (
     compare_heads,
 )
 from curator.taste.embedding.errors import EmbeddingError
+from curator.taste.embedding.grouping import (
+    GROUP_SIMILARITY_THRESHOLD,
+    MAX_CANDIDATE_POOL,
+    GroupSelection,
+    resolve_group_pool,
+    select_group,
+)
 from curator.taste.embedding.head import (
     VoteVectors,
     fit_embedding_head,
@@ -341,6 +357,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the ranked proposals as structured JSON",
+    )
+
+    group = sub.add_parser(
+        "group",
+        help="propose a group of cataloged assets that belong together (embedding cosine)",
+    )
+    group.add_argument("asset", help="path to the cataloged local media asset to seed the group")
+    group.add_argument(
+        "--size",
+        type=int,
+        default=3,
+        help="how many images the group should contain, seed included (default: 3)",
+    )
+    group.add_argument(
+        "--pool-size",
+        type=int,
+        default=MAX_CANDIDATE_POOL,
+        help=(
+            "how many recently cataloged embedded assets to consider as candidates "
+            f"(default and hard bound: {MAX_CANDIDATE_POOL})"
+        ),
+    )
+    group.add_argument(
+        "--threshold",
+        type=float,
+        default=GROUP_SIMILARITY_THRESHOLD,
+        help=(
+            "minimum seed-to-candidate cosine similarity to join the group "
+            f"(default: {GROUP_SIMILARITY_THRESHOLD} — a stated, revisable default)"
+        ),
+    )
+    group.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the group selection as structured JSON",
     )
 
     manifest = sub.add_parser(
@@ -1093,6 +1144,116 @@ def _analyze_all_or_reuse(
         persisted = _load_analysis(catalog, entry_id)
         results.append(persisted if persisted is not None else provider.analyze(source))
     return propose_treatments(results, request, provider=provider)
+
+
+#: Named once so every ``curator group`` not-available message points at the same
+#: thing: auto-grouping is a convenience over M009's vectors, and a caller-supplied
+#: group has never depended on it.
+_GROUP_ALTERNATIVE = "auto-grouping unavailable; pass sources explicitly to `curator propose`"
+
+
+def _entry_sha256(catalog: Catalog, entry_id: int) -> str:
+    """Return the content sha for *entry_id* (mirrors ``_taste_embedding_resolve``'s query)."""
+    row = catalog.db.execute(
+        "SELECT sha256 FROM catalog_entries WHERE id = ?", (entry_id,)
+    ).fetchone()
+    if row is None:
+        raise CuratorError(f"catalog entry {entry_id} has no content sha")
+    return str(row[0])
+
+
+def _format_group(selection: GroupSelection) -> str:
+    """Render a :class:`GroupSelection` as a human-readable block."""
+    evidence = selection.evidence
+    if not selection.available:
+        return "\n".join(
+            [
+                f"group: unavailable — {selection.reason}",
+                f"  {_GROUP_ALTERNATIVE}",
+            ]
+        )
+    lines = [
+        f"group: {len(selection.members) + 1} image(s) — seed"
+        f" + {len(selection.members)} of {evidence['requested_group_size'] - 1} requested",
+        f"  seed   {selection.seed_sha256[:12]}",
+    ]
+    for member in selection.members:
+        lines.append(
+            f"  member {member.sha256[:12]}  asset {member.entry_id}"
+            f"  cosine {member.similarity:.3f}"
+        )
+    lines.append(
+        f"  affinity {evidence['affinity_source']}, threshold {evidence['threshold']:.2f},"
+        f" pool {evidence['pool_size']}, considered {evidence['considered']}"
+    )
+    return "\n".join(lines)
+
+
+def _group(args: argparse.Namespace) -> int:
+    """Propose a group of cataloged assets that belong together (M010/S04, R045).
+
+    Answers *which* images to hand ``curator propose``, never how they are
+    arranged — the geometry is :mod:`curator.artdirection`'s and never reads a
+    taste signal. The seed resolves through the existing :func:`_resolve_asset`
+    path; :func:`~curator.taste.embedding.grouping.resolve_group_pool` bounds the
+    candidate pool from the catalog *before* any similarity math; and
+    :func:`~curator.taste.embedding.grouping.select_group` does the rest.
+
+    Availability is delegated to the same
+    :meth:`~curator.taste.embedding.provider.OnnxEmbeddingProvider.probe`
+    ``embed-status`` reports, reusing its ``message`` verbatim, and every
+    not-available case — no model, no vectors, nothing above the threshold —
+    returns :data:`EXIT_NO_CHANGE` (3) with an actionable message naming the
+    alternative. An absent model is a **specified behavior**, never
+    :data:`EXIT_FATAL`: this is D024's "nothing to act on yet" posture, and it is
+    what keeps caller-supplied groups (``curator propose A B C``) working
+    unchanged. A *caller-contract* violation (``--size`` outside the layout
+    bounds, ``--pool-size`` over the grouping bound) is a different thing
+    entirely and surfaces as :class:`GroupingError` -> exit 2.
+
+    The seed's own entry id is merged into the mapping ``select_group`` requires
+    so that a seed which simply has no stored vector yet degrades honestly to an
+    unavailable selection instead of tripping that function's caller-contract
+    check.
+    """
+    paths = _asset_paths(args.asset, "group")
+    provider = OnnxEmbeddingProvider()
+    probe = provider.probe()
+    if not probe.ok:
+        message = f"{probe.message} — {_GROUP_ALTERNATIVE}"
+        if args.json:
+            print(
+                json.dumps(
+                    {"ok": False, "backend": probe.backend.value, "message": message},
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print(f"group: ok=False backend={probe.backend.value}")
+            print(f"  {message}")
+        return EXIT_NO_CHANGE
+    catalog, entry_id, _source = _resolve_asset(paths[0])
+    try:
+        seed_sha = _entry_sha256(catalog, entry_id)
+        pool, sha_to_entry_id = resolve_group_pool(
+            catalog, provider.model_version, limit=args.pool_size
+        )
+        selection = select_group(
+            seed_sha,
+            pool,
+            {**sha_to_entry_id, seed_sha: entry_id},
+            EmbeddingStore(catalog),
+            provider.model_version,
+            group_size=args.size,
+            threshold=args.threshold,
+        )
+    finally:
+        catalog.db.close()
+    if args.json:
+        print(json.dumps(selection.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(_format_group(selection))
+    return EXIT_OK if selection.available else EXIT_NO_CHANGE
 
 
 def _propose(args: argparse.Namespace) -> int:
@@ -2427,6 +2588,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return _scan(args)
     if args.command == "analyze":
         return _analyze(args)
+    if args.command == "group":
+        return _group(args)
     if args.command == "propose":
         return _propose(args)
     if args.command == "manifest":
