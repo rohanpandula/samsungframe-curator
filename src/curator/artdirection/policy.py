@@ -353,6 +353,13 @@ def propose_treatments(
                     score=round(affinity, 4),
                     evidence={
                         "affinity": affinity,
+                        # Named, never assumed (M010/S06). A diptych's score *is*
+                        # an affinity, and M010 introduced a second affinity
+                        # signal (M010/S04's embedding cosine), so an unlabeled
+                        # number here would be the one proposal a reader cannot
+                        # attribute — the exact ambiguity the locked
+                        # Parallel-not-Replace decision exists to prevent.
+                        "affinity_source": "pairing.affinity",
                         "phash_distance": results[1].pairing.phash_distance,
                         "palette_distance": results[1].pairing.palette_distance,
                         "orientation_match": results[1].pairing.orientation_match,
