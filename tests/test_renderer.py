@@ -383,3 +383,172 @@ def test_fullbleed_provenance_fields_present() -> None:
     assert r.sources == list(m.sources)
     assert isinstance(r.sha256, str) and len(r.sha256) == 64
     assert r.size_bytes > 0
+
+
+# -- M010/S02: one region-iterating branch for every multi-cell treatment ------
+
+
+NUP_COLORS = [(200, 40, 40), (40, 200, 40), (40, 40, 200), (200, 200, 40)]
+
+
+def _nup_sources(count: int, width: int = 1600, height: int = 1200):
+    """Return ({sha: bytes}, [sha...]) for *count* distinctly-colored sources."""
+    data: dict[str, bytes] = {}
+    order: list[str] = []
+    for index in range(count):
+        sha, payload = make_source(width, height, color=NUP_COLORS[index])
+        data[sha] = payload
+        order.append(sha)
+    return data, order
+
+
+def _nup_manifest(
+    treatment: LayoutTreatment,
+    order: list[str],
+    *,
+    upscale_warning: bool = False,
+) -> ArtDirectionManifest:
+    """A regionless N-up manifest — the renderer packs its cells at render time."""
+    return ArtDirectionManifest(
+        sources=list(order),
+        layout_treatment=treatment,
+        pairing_order=list(order),
+        processing_intent=ProcessingIntent(upscale_warning=upscale_warning),
+    )
+
+
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+@pytest.mark.parametrize(
+    "treatment,count",
+    [(LayoutTreatment.TRIPTYCH, 3), (LayoutTreatment.QUAD, 4)],
+)
+def test_nup_renders_exact_target_dims(treatment, count, target) -> None:
+    """Triptych and quad render at exact 1080p and 4K dimensions."""
+    src, order = _nup_sources(count)
+    m = _nup_manifest(treatment, order)
+    r = renderer.render(m, src, target)
+    assert (r.target_width, r.target_height) == target
+    assert r.treatment == treatment.value
+    assert open_rgb(renderer.render_bytes(m, src, target)).size == target
+
+
+def test_triptych_paints_every_cell() -> None:
+    """Each source lands in its own cell — three panels, not a truncated two."""
+    from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
+
+    src, order = _nup_sources(3)
+    m = _nup_manifest(LayoutTreatment.TRIPTYCH, order)
+    img = open_rgb(renderer.render_bytes(m, src, (1920, 1080)))
+    cells = equal_cells(
+        order, Cell(0, 0, 1920, 1080), gap=gutter_for_target((1920, 1080))
+    )
+    for index, cell in enumerate(cells):
+        center = (int(cell.x + cell.w // 2), int(cell.y + cell.h // 2))
+        assert img.getpixel(center) == NUP_COLORS[index]
+
+
+def test_nup_result_lists_every_source() -> None:
+    """RenderResult.sources reports all three sources, never the first two."""
+    src, order = _nup_sources(3)
+    r = renderer.render(_nup_manifest(LayoutTreatment.TRIPTYCH, order), src, (1920, 1080))
+    assert r.sources == order
+    assert len(r.sources) == 3
+
+
+def test_triptych_byte_determinism() -> None:
+    """An N-up render is byte-deterministic, like every other treatment."""
+    src, order = _nup_sources(3)
+    m = _nup_manifest(LayoutTreatment.TRIPTYCH, order)
+    first = renderer.render(m, src, (1920, 1080))
+    second = renderer.render(m, src, (1920, 1080))
+    assert first.sha256 == second.sha256
+    assert renderer.render_bytes(m, src, (1920, 1080)) == renderer.render_bytes(
+        m, src, (1920, 1080)
+    )
+
+
+def test_diptych_with_three_sources_is_rejected_not_truncated() -> None:
+    """The verified silent third-source drop is now a loud RenderError."""
+    src, order = _nup_sources(3)
+    m = _nup_manifest(LayoutTreatment.DIPTYCH, order)
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(m, src, (1920, 1080))
+    message = str(excinfo.value)
+    assert "exactly 2" in message
+    assert "got 3" in message
+    assert "never truncated" in message
+
+
+def test_triptych_with_two_sources_is_rejected() -> None:
+    """An under-count N-up keeps the pre-M010 message shape."""
+    src, order = _nup_sources(2)
+    m = _nup_manifest(LayoutTreatment.TRIPTYCH, order)
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(m, src, (1920, 1080))
+    assert "triptych requires at least three sources" in str(excinfo.value)
+
+
+def test_nup_missing_source_bytes_raises() -> None:
+    """A sha with no bytes is named, before any cell is packed."""
+    src, order = _nup_sources(3)
+    del src[order[2]]
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(_nup_manifest(LayoutTreatment.TRIPTYCH, order), src, (1920, 1080))
+    assert order[2] in str(excinfo.value)
+
+
+def test_nup_upscale_without_approval_raises_then_renders_with_it() -> None:
+    """A cell that would upscale its source is blocked by R008 until approved."""
+    src, order = _nup_sources(3, width=200, height=150)
+    blocked = _nup_manifest(LayoutTreatment.TRIPTYCH, order)
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(blocked, src, (1920, 1080))
+    assert "R008" in str(excinfo.value)
+
+    approved = _nup_manifest(LayoutTreatment.TRIPTYCH, order, upscale_warning=True)
+    r = renderer.render(approved, src, (1920, 1080))
+    assert r.upscaled_warning is True
+    assert (r.target_width, r.target_height) == (1920, 1080)
+
+
+def test_diptych_bytes_identical_to_pre_m010_box_math() -> None:
+    """The rewrite changes no rendered byte: parity against the old two-box math.
+
+    Reproduces ``_diptych``'s exact pre-M010 arithmetic (renderer.py:306-326 as
+    of M003/S01) and asserts the PNG bytes match what the region loop now
+    produces, at landscape, portrait and 4K targets.
+    """
+    from PIL import Image as PILImage
+
+    from curator.render.renderer import (
+        _background_color,
+        _encode_png,
+        _open_rgb,
+        _paste_panel,
+    )
+
+    (sha_a, dat_a), (sha_b, dat_b) = _diptych_sources()
+    m = ArtDirectionManifest(
+        sources=[sha_a, sha_b],
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        # Approved only so the 4K leg clears the R008 gate; the flag changes no
+        # pixel, so both sides of the parity comparison stay comparable.
+        processing_intent=ProcessingIntent(upscale_warning=True),
+    )
+    src = {sha_a: dat_a, sha_b: dat_b}
+
+    for target in [(1920, 1080), (900, 1440), (3840, 2160)]:
+        tw, th = target
+        canvas = PILImage.new("RGB", target, _background_color(m.background))
+        gap = max(1, min(tw, th) // 32)
+        if tw >= th:
+            panel_w = max(1, (tw - gap) // 2)
+            box_a = (0, 0, panel_w, th)
+            box_b = (tw - panel_w, 0, panel_w, th)
+        else:
+            panel_h = max(1, (th - gap) // 2)
+            box_a = (0, 0, tw, panel_h)
+            box_b = (0, th - panel_h, tw, panel_h)
+        _paste_panel(canvas, _open_rgb(dat_a)[0], box_a)
+        _paste_panel(canvas, _open_rgb(dat_b)[0], box_b)
+        assert _encode_png(canvas) == renderer.render_bytes(m, src, target)

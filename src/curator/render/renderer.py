@@ -15,9 +15,14 @@ Treatments implemented here:
   letterbox with the manifest background, with an optional matte border.
 - ``PANORAMIC`` — fit a wide source, centered, with neutral sides.
 - ``SQUARE`` — center a square canvas (side = min dimension) with balanced matte.
-- ``DIPTYCH`` — compose the first two sources side-by-side for landscape/wide
-  targets or stacked for portrait targets, each letterbox-fit within its half
-  separated by a thin deterministic gap.
+- ``DIPTYCH`` / ``TRIPTYCH`` / ``QUAD`` — every
+  :data:`~curator.artdirection.manifest.MULTI_CELL_TREATMENTS` member renders
+  through one region-iterating loop (:func:`_multi_cell`, M010/S02): the
+  manifest's cells are resolved for the target by
+  :func:`~curator.artdirection.packing.resolve_regions` and each source is
+  letterbox-fit into its own cell, separated by a thin deterministic gutter. A
+  manifest whose source count does not match its named template is **rejected**,
+  never truncated.
 
 Upscaling a source region relative to the target is never silent: it is blocked
 (``RenderError``) unless ``processing_intent.upscale_warning`` explicitly
@@ -36,10 +41,13 @@ from PIL import Image, ImageDraw, ImageOps
 from PIL.ImageColor import getrgb
 
 from curator.artdirection.manifest import (
+    _TREATMENT_SOURCE_COUNT,
+    MULTI_CELL_TREATMENTS,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
 )
+from curator.artdirection.packing import PackingError, resolve_regions
 from curator.errors import CuratorError
 from curator.hashing import sha256_hex
 
@@ -176,9 +184,8 @@ class DeterministicRenderer:
                 (target_height - art.height) // 2,
             )
             border = None
-        elif manifest.layout_treatment is LayoutTreatment.DIPTYCH:
-            _require_two_sources(manifest, sources)
-            art, upscaled = _diptych(
+        elif manifest.layout_treatment in MULTI_CELL_TREATMENTS:
+            art, upscaled = _multi_cell(
                 sources, manifest, (target_width, target_height)
             )
             offset = (0, 0)
@@ -206,12 +213,14 @@ class DeterministicRenderer:
     def _source_order(self, manifest: ArtDirectionManifest) -> list[str]:
         """Return the source shas in the order they appear in the render.
 
-        Diptych resolves to its pairing order (falling back to source order);
-        other treatments use the manifest source order.
+        A multi-cell treatment resolves to its pairing order (falling back to
+        source order) — **every** source it lays out, not the first two
+        (M010/S02): a ``RenderResult`` that under-reported its own sources was
+        the reporting half of the same silent-truncation bug ``_multi_cell``
+        closes. Other treatments use the manifest source order.
         """
-        if manifest.layout_treatment is LayoutTreatment.DIPTYCH:
-            order = manifest.pairing_order or list(manifest.sources)
-            return order[:2]
+        if manifest.layout_treatment in MULTI_CELL_TREATMENTS:
+            return list(manifest.pairing_order or manifest.sources)
         return list(manifest.sources)
 
     def _result(
@@ -279,51 +288,66 @@ def _centered_offset(art: Image.Image, tw: int, th: int) -> tuple[int, int]:
     return ((tw - art.width) // 2, (th - art.height) // 2)
 
 
-def _require_two_sources(
-    manifest: ArtDirectionManifest, sources: dict[str, bytes]
-) -> None:
-    """Ensure the diptych has two present sources (pairing or source order)."""
-    order = manifest.pairing_order or list(manifest.sources)
-    pairs = order[:2]
-    if len(pairs) < 2:
-        raise RenderError("diptych requires at least two sources")
-    for sha in pairs:
-        if sha not in sources:
-            raise RenderError(f"missing source bytes for {sha!r}")
+#: Spelled-out counts, so an under-count error reads as prose (M010/S02).
+_COUNT_WORDS = {2: "two", 3: "three", 4: "four"}
 
 
-def _diptych(
+def _multi_cell(
     sources: dict[str, bytes],
     manifest: ArtDirectionManifest,
     target: tuple[int, int],
 ) -> tuple[Image.Image, bool]:
-    """Compose a diptych canvas from the first two sources.
+    """Compose any multi-cell treatment as one region-iterating loop (M010/S02).
 
-    Side-by-side when ``target_width >= target_height``, stacked otherwise.
-    Each panel is letterbox-fit within its half and centered, separated by a
-    thin gap; returns the composed canvas and whether any panel is upscaled.
+    Replaces the diptych special case: the cells come from
+    :func:`~curator.artdirection.packing.resolve_regions` (stored geometry when
+    it exactly tiles this target, freshly packed cells otherwise) and each source
+    is letterbox-fit into its own cell by the already-generic
+    :func:`_paste_panel`. Because ``equal_cells`` at N=2 reproduces the old
+    diptych box math exactly, every pre-existing diptych render stays
+    byte-identical.
+
+    **Reject, never truncate.** A treatment with an entry in
+    :data:`~curator.artdirection.manifest._TREATMENT_SOURCE_COUNT` must be handed
+    exactly that many sources; an over-count used to render silently, dropping
+    every source past the second. Returns the composed canvas plus
+    ``any(per-cell upscaled)`` — the whole-manifest generalization of the old
+    ``up_a or up_b``, which the caller's R008 gate then approves or blocks once.
     """
-    tw, th = target
     order = manifest.pairing_order or list(manifest.sources)
-    a_img, _, _ = _open_rgb(sources[order[0]])
-    b_img, _, _ = _open_rgb(sources[order[1]])
+    treatment = manifest.layout_treatment
+    required = _TREATMENT_SOURCE_COUNT.get(treatment)
+    if required is not None and len(order) != required:
+        if len(order) < required:
+            raise RenderError(
+                f"{treatment.value} requires at least "
+                f"{_COUNT_WORDS[required]} sources, got {len(order)}"
+            )
+        raise RenderError(
+            f"{treatment.value} requires exactly {required} sources, got "
+            f"{len(order)} — an over-count request is rejected, never truncated"
+        )
+    for sha in order:
+        if sha not in sources:
+            raise RenderError(f"missing source bytes for {sha!r}")
 
-    bg = _background_color(manifest.background)
-    canvas = Image.new("RGB", target, bg)
+    try:
+        regions = resolve_regions(manifest, target)
+    except PackingError as exc:
+        raise RenderError(str(exc)) from exc
 
-    gap = max(1, min(tw, th) // 32)
-    if tw >= th:
-        panel_w = max(1, (tw - gap) // 2)
-        box_a = (0, 0, panel_w, th)
-        box_b = (tw - panel_w, 0, panel_w, th)
-    else:
-        panel_h = max(1, (th - gap) // 2)
-        box_a = (0, 0, tw, panel_h)
-        box_b = (0, th - panel_h, tw, panel_h)
-
-    up_a = _paste_panel(canvas, a_img, box_a)
-    up_b = _paste_panel(canvas, b_img, box_b)
-    return canvas, up_a or up_b
+    canvas = Image.new("RGB", target, _background_color(manifest.background))
+    upscaled: list[bool] = []
+    for region in regions:
+        img, _, _ = _open_rgb(sources[region.source_sha256])
+        upscaled.append(
+            _paste_panel(
+                canvas,
+                img,
+                (int(region.x), int(region.y), int(region.w), int(region.h)),
+            )
+        )
+    return canvas, any(upscaled)
 
 
 def _paste_panel(
