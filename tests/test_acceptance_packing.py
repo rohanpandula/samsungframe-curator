@@ -1,0 +1,564 @@
+"""Acceptance gate for the M010 Arbitrary Packing milestone (R044-R047).
+
+This module ships the **11th** deterministic, air-gapped acceptance file
+(M010/S06). Each scenario is **self-bootstrapping**: it mints its own sources,
+analysis fixtures and vectors over the isolated ``data_root`` (from conftest) and
+drives the real subsystem objects — ``propose_treatments`` /
+``materialize_manifest``, ``DeterministicRenderer``, ``ArtifactValidator``,
+``packing``, ``select_group`` — plus the real CLI in-process through
+``acceptance_harness.run_cli``. Never a live server, never a subprocess, never
+the network, and never a model download: the grouping scenario hand-seeds
+vectors into an ``EmbeddingStore`` rather than running inference at all.
+
+* Scenario A (R044) — the manifest carries real, invariant-checked geometry:
+  triptych/quad/packed cells tile the canvas exactly, ``validate()`` bites on all
+  three M010/S01 invariants, a legacy all-zero-region manifest still validates
+  *and* still renders, and ``ArtifactValidator(source_regions=...)`` passes a real
+  render while failing a hand-made overlapping pair.
+* Scenario B (R044) — N cells render: exact dims at 1080p and 4K with every
+  source reported (not the first two), a 3-source ``DIPTYCH`` rejected loudly, and
+  the R008 upscale gate firing through **both** the letterbox path and the
+  crop-to-fill path — with a control proving the fill scale is what trips it.
+* Scenario C (R046) — determinism and engine purity: byte-identical manifests and
+  byte-identical rendered PNG bytes on repeat at 1080p **and** 4K, the stated
+  ``ceil(N/2)`` tie-break for N in 2..9, and an **AST-parsed** purity scan (never a
+  substring scan, which would trip on the rule's own statement of itself — D027).
+* Scenario D (R045) — bounded-pool grouping and honest degradation: a closer
+  vector outside the pool is never returned, another ``model_version`` is
+  invisible, a zero-norm row never surfaces as the most similar member, the two
+  affinity signals stay named apart (Parallel-not-Replace), and an empty store
+  reports unavailable while a caller-supplied group still proposes and renders.
+* Scenario E (R047) — reachability, strictly stronger than M009's. M009 asserts
+  ``symbol in cli_source or symbol in api_source``; R047's whole point is that the
+  API is *not* sufficient, so this scenario never reads ``api.py`` and asserts, as
+  data, that it cannot.
+* Scenario F — the air gap plus the full user loop through the real CLI at N=2,
+  N=3 and N=5: propose -> manifest -> render -> validate, exit 0 at every step.
+"""
+
+from __future__ import annotations
+
+import ast
+import io
+import json
+import math
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from PIL import Image
+
+from analysis_factory import crop_risky_result, make_result
+from curator.artdirection.manifest import (
+    CROP_FILL,
+    MAX_LAYOUT_SOURCES,
+    ArtDirectionManifest,
+    LayoutTreatment,
+    ManifestError,
+    ProcessingIntent,
+    SourceRegion,
+)
+from curator.artdirection.packing import (
+    Cell,
+    equal_cells,
+    gutter_for_target,
+    resolve_regions,
+)
+from curator.artdirection.policy import (
+    ArtDirectionRequest,
+    TreatmentProposal,
+    materialize_manifest,
+    propose_treatments,
+)
+from curator.hashing import sha256_hex
+from curator.render.renderer import DeterministicRenderer, RenderError
+from curator.render.validate import ArtifactValidator
+
+TARGET_1080P = (1920, 1080)
+TARGET_4K = (3840, 2160)
+
+#: Every scenario's default source size.
+#:
+#: Chosen so a crop-to-fill cell never upscales at **either** target: the tallest
+#: 4K cell a triptych produces is 2160px, and the fill scale is
+#: ``max(cell_w / sw, cell_h / sh)``, so a source shorter than 2160 would trip the
+#: R008 gate at 4K and mask what these scenarios are actually asserting. The
+#: upscale gate gets its own deliberately-undersized fixtures in Scenario B.
+SOURCE_SIZE = (2400, 2400)
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+# ---------------------------------------------------------------------------
+# fixtures — every scenario builds its own world
+# ---------------------------------------------------------------------------
+
+
+def _png(width: int, height: int, color: tuple[int, int, int]) -> tuple[str, bytes]:
+    """Return ``(sha256, PNG bytes)`` for a solid deterministic image.
+
+    ``tests/test_renderer.py``'s ``make_source`` idiom: the content sha is the
+    identity every manifest, region and render result is keyed by, so it is
+    derived from the bytes rather than invented.
+    """
+    img = Image.new("RGB", (width, height), color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+    return sha256_hex(data), data
+
+
+def _sources(
+    count: int, size: tuple[int, int] = SOURCE_SIZE
+) -> tuple[list[str], dict[str, bytes]]:
+    """Mint *count* distinct sources; return their shas in order plus the bytes map."""
+    shas: list[str] = []
+    payloads: dict[str, bytes] = {}
+    for index in range(count):
+        sha, data = _png(size[0], size[1], (40 + 20 * index, 90, 170))
+        shas.append(sha)
+        payloads[sha] = data
+    return shas, payloads
+
+
+def _analysis(
+    shas: list[str], *, size: tuple[int, int] = SOURCE_SIZE, affinity: float = 0.9
+) -> list:
+    """One crop-safe, well-margined ``AnalysisResult`` per sha, in source order.
+
+    ``affinity`` is what the policy engine reads from ``results[1:]`` for the
+    group-cohesion gate, so 0.9 clears both ``NUP_AFFINITY`` (0.6) and
+    ``DIPTYCH_AFFINITY`` (0.75) without a provider.
+    """
+    return [
+        make_result(asset_id=sha, map_size=size, affinity=affinity) for sha in shas
+    ]
+
+
+def _request(
+    shas: list[str], target: tuple[int, int] = TARGET_1080P, **context: object
+) -> ArtDirectionRequest:
+    return ArtDirectionRequest(
+        target="4k" if target == TARGET_4K else "1080p",
+        target_width=target[0],
+        target_height=target[1],
+        sources=list(shas),
+        context=dict(context),
+    )
+
+
+def _pick(proposals: list[TreatmentProposal], treatment: LayoutTreatment) -> TreatmentProposal:
+    """Return the *treatment* proposal, or fail naming what was actually proposed."""
+    for proposal in proposals:
+        if proposal.treatment is treatment:
+            return proposal
+    raise AssertionError(
+        f"{treatment.value} not proposed; got {[p.treatment.value for p in proposals]}"
+    )
+
+
+def _materialize(
+    treatment: LayoutTreatment,
+    shas: list[str],
+    results: list,
+    target: tuple[int, int] = TARGET_1080P,
+    **context: object,
+) -> tuple[TreatmentProposal, ArtDirectionManifest]:
+    """Drive the **real** propose -> materialize path and return both halves."""
+    request = _request(shas, target, **context)
+    proposal = _pick(propose_treatments(results, request), treatment)
+    return proposal, materialize_manifest(proposal, request, list(shas))
+
+
+def _overlap(a: SourceRegion, b: SourceRegion) -> bool:
+    """True when two cells share any area (touching edges do not count)."""
+    return bool(
+        a.x < b.x + b.w and b.x < a.x + a.w and a.y < b.y + b.h and b.y < a.y + a.h
+    )
+
+
+def _assert_tiles(regions: list[SourceRegion], target: tuple[int, int]) -> None:
+    """Assert *regions* are real, in-bounds, disjoint cells that tile *target* exactly."""
+    tw, th = target
+    assert regions
+    for region in regions:
+        assert region.is_unset is False, "a materialized cell must declare geometry"
+        assert region.w >= 1.0 and region.h >= 1.0
+        assert 0.0 <= region.x and region.x + region.w <= tw
+        assert 0.0 <= region.y and region.y + region.h <= th
+    for index, first in enumerate(regions):
+        for second in regions[index + 1 :]:
+            assert not _overlap(first, second), f"cells overlap: {first} / {second}"
+    assert max(region.x + region.w for region in regions) == tw
+    assert max(region.y + region.h for region in regions) == th
+
+
+# ---------------------------------------------------------------------------
+# Scenario A (R044) — the manifest carries real, invariant-checked geometry
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_packing_manifest_cells_are_real_geometry() -> None:
+    """Triptych, quad and packed manifests tile the canvas with one real cell each."""
+    for count, treatment in (
+        (3, LayoutTreatment.TRIPTYCH),
+        (4, LayoutTreatment.QUAD),
+        (5, LayoutTreatment.PACKED),
+    ):
+        shas, _payloads = _sources(count)
+        _proposal, manifest = _materialize(treatment, shas, _analysis(shas))
+
+        assert manifest.validate() is None
+        assert len(manifest.regions) == len(manifest.sources) == count
+        assert [region.source_sha256 for region in manifest.regions] == shas
+        _assert_tiles(manifest.regions, TARGET_1080P)
+
+
+def test_acceptance_packing_manifest_invariants_bite() -> None:
+    """Each of M010/S01's three invariants raises, and the message names the problem.
+
+    All three passed silently before M010: a manifest could carry one region for
+    three sources, a region naming a sha nothing else mentions, or an over-cap
+    source list the renderer would then truncate.
+    """
+    shas, _payloads = _sources(3)
+    _proposal, manifest = _materialize(LayoutTreatment.TRIPTYCH, shas, _analysis(shas))
+
+    with pytest.raises(ManifestError) as short:
+        replace(manifest, regions=manifest.regions[:1]).validate()
+    assert "one region per source is required" in str(short.value)
+
+    dangling = replace(manifest.regions[0], source_sha256="f" * 64)
+    with pytest.raises(ManifestError) as unknown:
+        replace(manifest, regions=[dangling, *manifest.regions[1:]]).validate()
+    assert "region references source(s) not in manifest" in str(unknown.value)
+
+    with pytest.raises(ManifestError) as over_cap:
+        ArtDirectionManifest(
+            sources=[f"{index:064d}" for index in range(MAX_LAYOUT_SOURCES + 1)]
+        ).validate()
+    message = str(over_cap.value)
+    assert f"{MAX_LAYOUT_SOURCES}-source layout cap" in message
+    assert "never truncated" in message
+
+
+def test_acceptance_packing_legacy_all_zero_regions_still_validate_and_render() -> None:
+    """Open Question #2, checked rather than assumed: unset != a zero-sized cell.
+
+    Every ``art_direction_manifests`` row persisted before M010 carries four
+    zeros per region. ``is_unset`` is what keeps that history valid, and
+    ``resolve_regions`` recomputes real cells for it at render time.
+    """
+    shas, payloads = _sources(2)
+    legacy = ArtDirectionManifest(
+        sources=shas,
+        regions=[SourceRegion(source_sha256=sha) for sha in shas],
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=shas,
+    )
+    assert all(region.is_unset for region in legacy.regions)
+    assert legacy.validate() is None
+
+    result = DeterministicRenderer().render(legacy, payloads, TARGET_1080P)
+    assert (result.target_width, result.target_height) == TARGET_1080P
+    assert result.sources == shas
+    assert result.upscaled_warning is False
+    _assert_tiles(resolve_regions(legacy, TARGET_1080P), TARGET_1080P)
+
+
+def test_acceptance_packing_validator_checks_every_cell() -> None:
+    """The validator's N-cell path passes a real render and fails an overlapping pair."""
+    shas, payloads = _sources(3)
+    _proposal, manifest = _materialize(LayoutTreatment.TRIPTYCH, shas, _analysis(shas))
+    payload = DeterministicRenderer().render_bytes(manifest, payloads, TARGET_1080P)
+
+    report = ArtifactValidator().validate(
+        payload,
+        sha256_hex(payload),
+        TARGET_1080P,
+        source_regions=resolve_regions(manifest, TARGET_1080P),
+    )
+    names = {check.name for check in report.checks}
+    assert report.publishable is True
+    assert "source_regions_disjoint" in names
+    assert {f"source_region[{index}]" for index in range(3)} <= names
+    assert {f"no_unintended_crop[{index}]" for index in range(3)} <= names
+
+    overlapping = [
+        SourceRegion(source_sha256=shas[0], x=0, y=0, w=1000, h=1080),
+        SourceRegion(source_sha256=shas[1], x=500, y=0, w=1000, h=1080),
+    ]
+    bad = ArtifactValidator().validate(
+        payload, sha256_hex(payload), TARGET_1080P, source_regions=overlapping
+    )
+    disjoint = next(c for c in bad.checks if c.name == "source_regions_disjoint")
+    assert bad.publishable is False
+    assert disjoint.passed is False
+    assert "overlaps" in disjoint.reason
+
+
+# ---------------------------------------------------------------------------
+# Scenario B (R044) — N cells render, nothing dropped, nothing silently upscaled
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_packing_n_cells_render_at_both_targets() -> None:
+    """A triptych and a quad render at exact dims with **every** source reported.
+
+    ``RenderResult.sources`` under-reporting its own layout was the reporting
+    half of the silent-truncation bug M010/S02 closed, so it is asserted here
+    alongside the dimensions rather than inferred from them.
+    """
+    for count, treatment in ((3, LayoutTreatment.TRIPTYCH), (4, LayoutTreatment.QUAD)):
+        shas, payloads = _sources(count)
+        results = _analysis(shas)
+        for target in (TARGET_1080P, TARGET_4K):
+            _proposal, manifest = _materialize(treatment, shas, results, target)
+            result = DeterministicRenderer().render(manifest, payloads, target)
+            assert (result.target_width, result.target_height) == target
+            assert result.sources == shas
+            assert len(result.sources) == count
+            assert result.treatment == treatment.value
+            assert result.upscaled_warning is False
+
+
+def test_acceptance_packing_over_count_diptych_is_loud() -> None:
+    """The verified silent third-source drop, now an error naming both counts."""
+    shas, payloads = _sources(3)
+    gap = gutter_for_target(TARGET_1080P)
+    manifest = ArtDirectionManifest(
+        sources=shas,
+        regions=equal_cells(shas, Cell(0, 0, *TARGET_1080P), gap=gap),
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=shas,
+    )
+
+    with pytest.raises(RenderError) as excinfo:
+        DeterministicRenderer().render(manifest, payloads, TARGET_1080P)
+    message = str(excinfo.value)
+    assert "requires exactly 2 sources" in message
+    assert "got 3" in message
+    assert "never truncated" in message
+
+
+def _two_cell_manifest(
+    shas: list[str], crops: list[str | None], *, approved: bool
+) -> ArtDirectionManifest:
+    """A hand-authored two-cell manifest with an explicit per-cell fit each."""
+    gap = gutter_for_target(TARGET_1080P)
+    cells = equal_cells(shas, Cell(0, 0, *TARGET_1080P), gap=gap)
+    return ArtDirectionManifest(
+        sources=shas,
+        regions=[
+            replace(cell, crop=crop) for cell, crop in zip(cells, crops, strict=True)
+        ],
+        layout_treatment=LayoutTreatment.DIPTYCH,
+        pairing_order=shas,
+        processing_intent=ProcessingIntent(upscale_warning=approved),
+    )
+
+
+def test_acceptance_packing_letterbox_upscale_is_gated() -> None:
+    """A cell that would upscale while letterboxing is blocked, then renders once approved."""
+    small_sha, small = _png(100, 100, (10, 20, 30))
+    big_sha, big = _png(2400, 2400, (200, 180, 60))
+    payloads = {small_sha: small, big_sha: big}
+    shas = [small_sha, big_sha]
+
+    with pytest.raises(RenderError) as blocked:
+        DeterministicRenderer().render(
+            _two_cell_manifest(shas, [None, None], approved=False),
+            payloads,
+            TARGET_1080P,
+        )
+    assert "R008" in str(blocked.value)
+    assert "upscale" in str(blocked.value).lower()
+
+    approved = DeterministicRenderer().render(
+        _two_cell_manifest(shas, [None, None], approved=True), payloads, TARGET_1080P
+    )
+    assert approved.upscaled_warning is True
+    assert approved.sources == shas
+
+
+def test_acceptance_packing_crop_to_fill_upscale_is_gated() -> None:
+    """The gate sees the **fill** scale, and that claim is falsifiable, not asserted.
+
+    The 2000x400 source in a 943x1080 cell is chosen because the two scales
+    *disagree*: the letterbox fit scale is 0.47 (no upscale) while the fill scale
+    is 2.7. Rendering the identical manifest with the fill directive removed is
+    what makes the difference attributable to the crop path rather than to the
+    fixture.
+    """
+    wide_sha, wide = _png(2000, 400, (30, 120, 90))
+    big_sha, big = _png(4000, 3000, (200, 180, 60))
+    payloads = {wide_sha: wide, big_sha: big}
+    shas = [wide_sha, big_sha]
+
+    with pytest.raises(RenderError) as blocked:
+        DeterministicRenderer().render(
+            _two_cell_manifest(shas, [CROP_FILL, None], approved=False),
+            payloads,
+            TARGET_1080P,
+        )
+    assert "R008" in str(blocked.value)
+
+    filled = DeterministicRenderer().render(
+        _two_cell_manifest(shas, [CROP_FILL, None], approved=True),
+        payloads,
+        TARGET_1080P,
+    )
+    assert filled.upscaled_warning is True
+
+    # The control: the same sources and the same cells, letterboxed. No upscale,
+    # so the fill directive is the only cause — and no approval is needed.
+    letterboxed = DeterministicRenderer().render(
+        _two_cell_manifest(shas, [None, None], approved=False), payloads, TARGET_1080P
+    )
+    assert letterboxed.upscaled_warning is False
+
+
+def test_acceptance_packing_a_crop_risky_source_never_fills() -> None:
+    """No proposal marks a crop-risky source ``fill``, and the manifest agrees."""
+    shas, _payloads = _sources(4)
+    results = _analysis(shas)
+    results[2] = crop_risky_result(asset_id=shas[2])
+
+    proposal, manifest = _materialize(LayoutTreatment.QUAD, shas, results)
+
+    cells = proposal.evidence["cells"]
+    assert len(cells) == 4
+    assert cells[2]["crop"] is None
+    assert cells[2]["crop_safe"] is False
+    assert any(cell["crop"] == CROP_FILL for cell in cells), (
+        "the fixture must contain at least one filling cell for the negative to bite"
+    )
+    # The materialized manifest carries exactly the proposal's verdicts, keyed by
+    # sha — a crop-safe source's `fill` never lands on the risky source's cell.
+    by_sha = {region.source_sha256: region.crop for region in manifest.regions}
+    assert by_sha == {cell["sha"]: cell["crop"] for cell in cells}
+    assert by_sha[shas[2]] is None
+
+
+# ---------------------------------------------------------------------------
+# Scenario C (R046) — determinism and engine purity
+# ---------------------------------------------------------------------------
+
+
+def test_acceptance_packing_is_byte_identical_at_1080p_and_4k() -> None:
+    """Identical sources and weights produce identical manifests and identical bytes.
+
+    Asserted at **both** targets rather than one, extending
+    ``test_acceptance_render.py``'s ``test_render_determinism_1080p_and_4k``
+    style: per-cell rounding drift can appear at one target and not the other, so
+    a single-resolution check could not catch it.
+    """
+    shas, payloads = _sources(3)
+    weights = [0.9, 0.4, 0.4]
+    renderer = DeterministicRenderer()
+
+    for target in (TARGET_1080P, TARGET_4K):
+        first_proposal, first = _materialize(
+            LayoutTreatment.PACKED, shas, _analysis(shas), target, weights=weights
+        )
+        _second_proposal, second = _materialize(
+            LayoutTreatment.PACKED, shas, _analysis(shas), target, weights=weights
+        )
+        as_json = json.dumps(first.to_dict(), sort_keys=True)
+        assert as_json == json.dumps(second.to_dict(), sort_keys=True)
+        assert first_proposal.evidence["weights"] == weights
+
+        payload_a = renderer.render_bytes(first, payloads, target)
+        payload_b = renderer.render_bytes(second, payloads, target)
+        assert payload_a == payload_b
+        assert sha256_hex(payload_a) == sha256_hex(payload_b)
+        _assert_tiles(first.regions, target)
+
+
+def test_acceptance_packing_tie_break_puts_ceil_half_on_the_left() -> None:
+    """Uniform weights split the list at ``ceil(N / 2)`` for every N in 2..9.
+
+    Stated in public terms — the root cut of a landscape box is vertical, so the
+    first ``ceil(N / 2)`` cells all sit strictly left of the rest. That is the
+    rule ``equal_cells`` documented in M010/S01 and the one M010/S03's weighted
+    bisection was chosen to reproduce.
+    """
+    gap = gutter_for_target(TARGET_1080P)
+    for count in range(2, MAX_LAYOUT_SOURCES + 1):
+        shas = [f"{index:064d}" for index in range(count)]
+        regions = equal_cells(shas, Cell(0, 0, *TARGET_1080P), gap=gap)
+        split = math.ceil(count / 2)
+        boundary = regions[split].x
+        assert all(r.x + r.w <= boundary for r in regions[:split]), count
+        assert all(r.x >= boundary for r in regions[split:]), count
+        _assert_tiles(regions, TARGET_1080P)
+
+
+#: Top-level modules the packing/policy engines must never import.
+#:
+#: ``PIL`` and ``sqlite3`` would make the geometry impure; ``random``, ``time``
+#: and ``datetime`` would break determinism; ``curator.taste`` would breach the
+#: locked "treatment-level taste is out of scope" boundary.
+_ENGINE_BANNED_IMPORTS = ("random", "time", "datetime", "PIL", "sqlite3")
+
+#: Search-optimizer vocabulary, checked as **identifiers** rather than substrings.
+#:
+#: ``packing.py``'s own module docstring states the rule ("no iteration count, no
+#: temperature schedule"), so a substring scan would fail on the engine's
+#: statement of the very constraint it is honoring — the D027 self-reference trap.
+#: An AST identifier walk sees ``temperature = 0.9`` and never sees a docstring.
+_SEARCH_LOOP_TOKENS = ("temperature", "anneal", "iterations")
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    """Every module name *tree* imports, absolute and dotted."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module)
+    return names
+
+
+def _identifiers(tree: ast.AST) -> set[str]:
+    """Every identifier *tree* binds or references (never a docstring or comment)."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.keyword) and node.arg:
+            names.add(node.arg)
+    return names
+
+
+def test_acceptance_packing_engines_are_pure() -> None:
+    """``packing.py`` and ``policy.py`` import nothing that could make them impure."""
+    for module in ("packing.py", "policy.py"):
+        path = REPO_ROOT / "src" / "curator" / "artdirection" / module
+        imported = _imported_names(ast.parse(path.read_text(encoding="utf-8")))
+        offenders = sorted(
+            name
+            for name in imported
+            if name.split(".")[0] in _ENGINE_BANNED_IMPORTS
+            or name.startswith("curator.taste")
+        )
+        assert offenders == [], f"{module} imports {offenders}"
+
+
+def test_acceptance_packing_has_no_search_optimizer() -> None:
+    """The locked no-search-optimizer decision, restated as a test.
+
+    No iteration count, no temperature schedule, no candidate-layout list: the
+    packer is a single deterministic pass, and R046's byte-determinism guarantee
+    is what depends on it staying that way.
+    """
+    path = REPO_ROOT / "src" / "curator" / "artdirection" / "packing.py"
+    identifiers = _identifiers(ast.parse(path.read_text(encoding="utf-8")))
+    assert not (identifiers & set(_SEARCH_LOOP_TOKENS))
