@@ -19,8 +19,9 @@ Treatments implemented here:
   :data:`~curator.artdirection.manifest.MULTI_CELL_TREATMENTS` member renders
   through one region-iterating loop (:func:`_multi_cell`, M010/S02): the
   manifest's cells are resolved for the target by
-  :func:`~curator.artdirection.packing.resolve_regions` and each source is
-  letterbox-fit into its own cell, separated by a thin deterministic gutter. A
+  :func:`~curator.artdirection.packing.resolve_regions` and each source is fit
+  into its own cell — letterboxed by default, center-cropped to fill when its
+  region opts in (M010/S05) — separated by a thin deterministic gutter. A
   manifest whose source count does not match its named template is **rejected**,
   never truncated; ``PACKED`` (M010/S03) has no fixed count and needed no new
   branch here — only the 2..:data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES`
@@ -44,8 +45,10 @@ from PIL.ImageColor import getrgb
 
 from curator.artdirection.manifest import (
     _TREATMENT_SOURCE_COUNT,
+    CROP_FILL,
     MAX_LAYOUT_SOURCES,
     MULTI_CELL_TREATMENTS,
+    VALID_CROP_MODES,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
@@ -310,6 +313,16 @@ def _multi_cell(
     diptych box math exactly, every pre-existing diptych render stays
     byte-identical.
 
+    **Per-cell fit (M010/S05).** A region's ``crop`` selects how its source meets
+    its cell: falsy (``None`` / ``""``) letterboxes, which is the default and the
+    only fit any pre-S05 manifest can carry, and
+    :data:`~curator.artdirection.manifest.CROP_FILL` fills the cell through
+    :func:`_center_crop_fill` — the codebase's single crop, reused verbatim.
+    Anything else raises. The renderer holds no ``AnalysisResult`` and therefore
+    never decides *whether* a cell may be cropped; it only honors the decision
+    ``policy.materialize_manifest`` already gated on that source's own
+    ``crop_safety``.
+
     **Reject, never truncate.** A treatment with an entry in
     :data:`~curator.artdirection.manifest._TREATMENT_SOURCE_COUNT` must be handed
     exactly that many sources; an over-count used to render silently, dropping
@@ -353,14 +366,30 @@ def _multi_cell(
     canvas = Image.new("RGB", target, _background_color(manifest.background))
     upscaled: list[bool] = []
     for region in regions:
-        img, _, _ = _open_rgb(sources[region.source_sha256])
-        upscaled.append(
-            _paste_panel(
-                canvas,
-                img,
-                (int(region.x), int(region.y), int(region.w), int(region.h)),
+        img, sw, sh = _open_rgb(sources[region.source_sha256])
+        cell_x, cell_y = int(region.x), int(region.y)
+        cell_w, cell_h = int(region.w), int(region.h)
+        mode = region.crop
+        if not mode:
+            # The default, and every manifest written before M010/S05.
+            upscaled.append(_paste_panel(canvas, img, (cell_x, cell_y, cell_w, cell_h)))
+        elif mode == CROP_FILL:
+            canvas.paste(_center_crop_fill(img, cell_w, cell_h), (cell_x, cell_y))
+            # The FILL scale, exactly as `_render` computes it for
+            # SINGLE_FULLBLEED — never `_paste_panel`'s min(...) fit scale, which
+            # would let a cropped upscale slip past the R008 gate below.
+            upscaled.append(max(cell_w / sw, cell_h / sh) > 1.0)
+        else:
+            # Clear status, never silent: letterboxing an unrecognized directive
+            # would discard a caller's stated intent. (tests/test_manifest.py's
+            # full_manifest() fixture carries crop="center" purely to exercise the
+            # JSON round trip; it is never rendered.)
+            raise RenderError(
+                f"unknown crop mode {mode!r} on the region for "
+                f"{region.source_sha256!r} — accepted values are "
+                f"{sorted(VALID_CROP_MODES)} or null (letterbox); an unrecognized "
+                f"fit directive is rejected, never silently letterboxed"
             )
-        )
     return canvas, any(upscaled)
 
 

@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from curator.artdirection.manifest import ArtDirectionManifest, SourceRegion
@@ -294,6 +294,14 @@ def resolve_regions(
     All-or-nothing by design — stored and computed cells are never mixed, so a
     partially-populated manifest resolves to one internally consistent tiling
     instead of a collage of two coordinate systems.
+
+    Recomputing replaces the *geometry* only: each source's declared
+    :attr:`SourceRegion.crop` is carried onto its new cell (M010/S05). A crop is
+    a **fit** directive, not a coordinate — dropping it here would make the same
+    manifest fill at 1080p and letterbox at 4K, silently discarding an intent the
+    caller stated, which is precisely the failure this milestone exists to
+    remove. The crop map is built from *every* region, set or unset, so a legacy
+    all-zero region that nonetheless names a fit keeps it.
     """
     tw, th = target
     order = list(manifest.pairing_order) if manifest.pairing_order else list(manifest.sources)
@@ -306,4 +314,8 @@ def resolve_regions(
         )
         if tiles:
             return cells
-    return equal_cells(order, Cell(0, 0, tw, th), gap=gutter_for_target(target))
+    declared = {region.source_sha256: region.crop for region in manifest.regions}
+    return [
+        replace(cell, crop=declared.get(cell.source_sha256))
+        for cell in equal_cells(order, Cell(0, 0, tw, th), gap=gutter_for_target(target))
+    ]

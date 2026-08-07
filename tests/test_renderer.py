@@ -689,6 +689,179 @@ def test_a_1080p_packed_manifest_tiles_a_4k_canvas() -> None:
     assert {f"source_region[{i}]" for i in range(5)} <= names
 
 
+# -- M010/S05: the per-cell fit — letterbox by default, fill on opt-in ---------
+
+
+def _fit_manifest(
+    treatment: LayoutTreatment,
+    order: list[str],
+    crops: list[str | None],
+    *,
+    target: tuple[int, int] = (1920, 1080),
+    upscale_warning: bool = False,
+) -> ArtDirectionManifest:
+    """A manifest whose stored cells tile *target*, one declared fit per cell."""
+    from dataclasses import replace
+
+    from curator.artdirection.packing import Cell, equal_cells, gutter_for_target
+
+    cells = equal_cells(order, Cell(0, 0, *target), gap=gutter_for_target(target))
+    return ArtDirectionManifest(
+        sources=list(order),
+        regions=[
+            replace(cell, crop=crop)
+            for cell, crop in zip(cells, crops, strict=True)
+        ],
+        layout_treatment=treatment,
+        pairing_order=list(order),
+        processing_intent=ProcessingIntent(upscale_warning=upscale_warning),
+    )
+
+
+def test_a_fill_cell_reaches_its_corners_while_its_siblings_letterbox() -> None:
+    """The visible difference: one quad cell edge to edge, three with bars."""
+    from curator.artdirection.packing import resolve_regions
+
+    src, order = _packed_sources(4)
+    m = _fit_manifest(LayoutTreatment.QUAD, order, ["fill", None, None, None])
+    img = open_rgb(renderer.render_bytes(m, src, (1920, 1080)))
+    cells = resolve_regions(m, (1920, 1080))
+
+    filled = cells[0]
+    assert img.getpixel((int(filled.x), int(filled.y))) == PACKED_COLORS[0]
+    corner = (int(filled.x + filled.w) - 1, int(filled.y + filled.h) - 1)
+    assert img.getpixel(corner) == PACKED_COLORS[0]
+
+    letterboxed = cells[1]
+    assert img.getpixel((int(letterboxed.x), int(letterboxed.y))) == (0, 0, 0)
+    # ...and its own content is still there, centered inside the bars.
+    center = (
+        int(letterboxed.x + letterboxed.w // 2),
+        int(letterboxed.y + letterboxed.h // 2),
+    )
+    assert img.getpixel(center) == PACKED_COLORS[1]
+
+
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+def test_a_fill_cell_that_would_upscale_is_blocked_by_r008_then_renders(
+    target,
+) -> None:
+    """The fill scale feeds the gate — the fit scale alone would let this pass.
+
+    The source is 2000x400 into a quad cell of 943x523 (1886x1046 at 4K): the
+    letterbox fit scale is ``min(...) < 1`` and would report *no* upscale, while
+    the crop-to-fill scale is ``max(...) > 1``. Only the latter is correct here.
+    """
+    src, order = _packed_sources(3)
+    sha, data = make_source(2000, 400, color=(10, 20, 30))
+    src[sha] = data
+    order = [sha, *order]
+
+    blocked = _fit_manifest(
+        LayoutTreatment.QUAD, order, ["fill", None, None, None], target=target
+    )
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(blocked, src, target)
+    assert "R008" in str(excinfo.value)
+
+    approved = _fit_manifest(
+        LayoutTreatment.QUAD,
+        order,
+        ["fill", None, None, None],
+        target=target,
+        upscale_warning=True,
+    )
+    r = renderer.render(approved, src, target)
+    assert r.upscaled_warning is True
+    assert (r.target_width, r.target_height) == target
+
+
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+def test_the_same_cell_letterboxed_does_not_trip_the_upscale_gate(target) -> None:
+    """The control for the test above: without the opt-in, nothing upscales."""
+    src, order = _packed_sources(3)
+    sha, data = make_source(2000, 400, color=(10, 20, 30))
+    src[sha] = data
+    order = [sha, *order]
+    m = _fit_manifest(LayoutTreatment.QUAD, order, [None, None, None, None], target=target)
+    assert renderer.render(m, src, target).upscaled_warning is False
+
+
+def test_an_unrecognized_crop_mode_is_rejected_by_name() -> None:
+    """Clear status, never silent: a stated fit is never quietly downgraded.
+
+    ``tests/test_manifest.py``'s ``full_manifest()`` fixture carries
+    ``crop="center"`` purely to exercise the JSON round trip; it is never
+    rendered, which is why that value reaches no renderer today.
+    """
+    src, order = _packed_sources(2)
+    m = _fit_manifest(LayoutTreatment.DIPTYCH, order, ["center", None])
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(m, src, (1920, 1080))
+    message = str(excinfo.value)
+    assert "center" in message
+    assert "fill" in message
+    assert "letterbox" in message
+
+
+def test_an_empty_crop_string_letterboxes_like_none() -> None:
+    """``""`` is in the accepted vocabulary as a synonym for "no fit declared"."""
+    src, order = _packed_sources(2)
+    empty = _fit_manifest(LayoutTreatment.DIPTYCH, order, ["", ""])
+    plain = _fit_manifest(LayoutTreatment.DIPTYCH, order, [None, None])
+    assert renderer.render_bytes(empty, src, (1920, 1080)) == renderer.render_bytes(
+        plain, src, (1920, 1080)
+    )
+
+
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+def test_a_manifest_with_no_crop_renders_exactly_as_it_did_before_this_slice(
+    target,
+) -> None:
+    """Geometry and pixels are untouched unless a cell explicitly opts in.
+
+    The regionless manifest is the pre-M010/S05 shape — no ``crop`` anywhere —
+    and it must produce the same bytes as one whose cells declare no fit, twice
+    over.
+    """
+    src, order = _packed_sources(4)
+    declared = _fit_manifest(
+        LayoutTreatment.QUAD, order, [None] * 4, target=target
+    )
+    regionless = _nup_manifest(LayoutTreatment.QUAD, order)
+    first = renderer.render(declared, src, target)
+    assert first.sha256 == renderer.render(declared, src, target).sha256
+    assert renderer.render_bytes(declared, src, target) == renderer.render_bytes(
+        regionless, src, target
+    )
+
+
+def test_a_1080p_fill_manifest_still_fills_when_repacked_for_4k() -> None:
+    """A fit is not a coordinate: repacking for another target keeps the intent.
+
+    The stored 1920x1080 cells do not tile 3840x2160, so ``resolve_regions``
+    recomputes the geometry — and carries each source's declared crop onto its
+    new cell, rather than silently letterboxing a cell the crop-safety gate
+    already approved.
+    """
+    from curator.artdirection.packing import resolve_regions
+
+    # Large enough that filling a 4K cell is a downscale — this test is about the
+    # fit surviving the repack, not about the R008 gate.
+    src, order = _packed_sources(4, width=3200, height=2400)
+    m = _fit_manifest(LayoutTreatment.QUAD, order, ["fill", None, None, None])
+    assert max(r.x + r.w for r in m.regions) == 1920
+
+    uhd = (3840, 2160)
+    regions = resolve_regions(m, uhd)
+    assert max(r.x + r.w for r in regions) == 3840
+    assert [r.crop for r in regions] == ["fill", None, None, None]
+
+    img = open_rgb(renderer.render_bytes(m, src, uhd))
+    assert img.getpixel((int(regions[0].x), int(regions[0].y))) == PACKED_COLORS[0]
+    assert img.getpixel((int(regions[1].x), int(regions[1].y))) == (0, 0, 0)
+
+
 def test_packed_over_the_cap_is_rejected_before_any_decode() -> None:
     """The cap fires in validate(), _render's first statement — zero Pillow work.
 
