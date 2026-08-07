@@ -601,7 +601,11 @@ def _manifest_crops(
     not match the source count is a stale or hand-edited row and is **rejected**,
     never silently applied to the wrong cells. A value outside
     :data:`~curator.artdirection.manifest.VALID_CROP_MODES` is rejected here so a
-    caller learns at manifest time, not at render time.
+    caller learns at manifest time, not at render time. A non-dict cell entry is
+    rejected the same way (WR-01) — coercing it to ``{}`` would silently apply
+    the safe letterbox default while masking a corrupted or hand-edited
+    ``proposals`` row, breaking this function's own "reject, never silently
+    apply" contract on the one path that never actually raised.
     """
     cells = proposal.evidence.get("cells")
     if cells is None:
@@ -617,17 +621,21 @@ def _manifest_crops(
         )
     crops: dict[str, str | None] = {}
     for cell, sha in zip(cells, sources_sha, strict=True):
-        entry = cell if isinstance(cell, dict) else {}
-        value = entry.get("crop")
+        if not isinstance(cell, dict):
+            raise ManifestError(
+                f"proposal evidence cell for source {sha!r} must be a dict, "
+                f"got {type(cell).__name__}"
+            )
+        value = cell.get("crop")
         if value is None or value == "":
-            crops[str(entry.get("sha", sha))] = None
+            crops[str(cell.get("sha", sha))] = None
             continue
         if value not in VALID_CROP_MODES:
             raise ManifestError(
                 f"unknown cell crop mode {value!r} — accepted values are "
                 f"{sorted(VALID_CROP_MODES)} or null (letterbox)"
             )
-        crops[str(entry.get("sha", sha))] = str(value)
+        crops[str(cell.get("sha", sha))] = str(value)
     return crops
 
 

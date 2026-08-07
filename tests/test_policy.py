@@ -846,6 +846,24 @@ def test_materialize_rejects_an_out_of_vocabulary_crop() -> None:
     assert "fill" in message
 
 
+def test_materialize_rejects_a_non_dict_cell_entry() -> None:
+    """WR-01: a malformed (non-dict) cell entry used to be silently coerced to
+    ``{}`` — an empty, letterbox cell keyed by the positional sha fallback —
+    instead of raising like every other malformed-evidence case in this same
+    function (wrong type for ``cells``, wrong length, unknown crop mode)."""
+    prop = TreatmentProposal(
+        treatment=LayoutTreatment.PACKED,
+        score=0.9,
+        evidence={"cells": ["not-a-dict", {"sha": "b"}]},
+    )
+    with pytest.raises(ManifestError) as excinfo:
+        materialize_manifest(prop, _request(["a", "b"]), ["a", "b"])
+    message = str(excinfo.value)
+    assert "cell for source 'a'" in message
+    assert "must be a dict" in message
+    assert "str" in message
+
+
 def test_materialize_rejects_cells_that_do_not_match_the_sources() -> None:
     """A stale row is rejected rather than applied to whichever cells line up."""
     prop = TreatmentProposal(
