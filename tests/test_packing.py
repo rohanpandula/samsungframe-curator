@@ -7,6 +7,15 @@ the parity property that lets S02 replace the diptych special case without
 changing a rendered byte — cells identical to the current ``_diptych`` box math
 at N=2. Also covers ``resolve_regions``' all-or-nothing stored-vs-recomputed
 decision.
+
+M010/S03 adds the weighted half: ``slice_cells`` is now the one arithmetic path
+and ``equal_cells`` its uniform-weight delegate, so **every assertion above this
+line is untouched on purpose** — their passing against the delegated
+implementation is the proof that S03 generalized the packer instead of replacing
+it. The new tests below cover the weight-monotone property, the largest-index
+tie-break (``ceil(N/2)`` on uniform weights, for N = 2..9), the packer's
+invariants at every N from 2 to 9 at two targets, and the weight-hygiene
+fallbacks.
 """
 
 from __future__ import annotations
@@ -21,9 +30,12 @@ from curator.artdirection.manifest import (
 from curator.artdirection.packing import (
     Cell,
     PackingError,
+    WeightedSource,
+    _bisect_by_weight,
     equal_cells,
     gutter_for_target,
     resolve_regions,
+    slice_cells,
 )
 
 LANDSCAPE = (1920, 1080)
@@ -254,3 +266,208 @@ def test_resolve_follows_pairing_order_not_source_order() -> None:
 def test_resolve_is_deterministic() -> None:
     manifest = packed_manifest(LANDSCAPE, count=3)
     assert resolve_regions(manifest, UHD) == resolve_regions(manifest, UHD)
+
+
+# -- slice_cells: the weighted generalization (M010/S03) ----------------------
+
+
+def weighted(*weights: float) -> list[WeightedSource]:
+    return [WeightedSource(f"sha{i}", w) for i, w in enumerate(weights)]
+
+
+def uniform(count: int) -> list[WeightedSource]:
+    return [WeightedSource(sha) for sha in shas(count)]
+
+
+def area(region: SourceRegion) -> float:
+    return region.w * region.h
+
+
+def test_weighted_source_roundtrips() -> None:
+    item = WeightedSource("abc", 0.75)
+    assert WeightedSource.from_dict(item.to_dict()) == item
+    assert WeightedSource("abc").weight == 1.0
+
+
+def test_heavier_weight_gets_a_strictly_larger_cell_at_n2() -> None:
+    first, second = slice_cells(weighted(0.9, 0.3), Cell(0, 0, 1920, 1080), gap=33)
+    assert first.w > second.w
+    assert area(first) > area(second)
+
+
+def test_heavier_weight_gets_a_strictly_larger_cell_at_n3() -> None:
+    regions = slice_cells(weighted(3.0, 1.0, 1.0), Cell(0, 0, 1920, 1080), gap=33)
+    assert area(regions[0]) > area(regions[1])
+    assert area(regions[0]) > area(regions[2])
+
+
+def test_equal_weights_give_the_equal_cells_geometry() -> None:
+    """The generalization claim, stated directly rather than only via delegation."""
+    for count in range(2, 10):
+        box = Cell(0, 0, 1920, 1080)
+        assert slice_cells(uniform(count), box, gap=33) == equal_cells(
+            shas(count), box, gap=33
+        )
+
+
+# -- the tie-break rule -------------------------------------------------------
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_uniform_weights_put_ceil_half_on_the_left(count: int) -> None:
+    """Largest tied index == ceil(N/2) == M010/S01's stated equal-cells rule."""
+    assert _bisect_by_weight(uniform(count)) == -(-count // 2)
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_the_first_ceil_half_of_cells_sit_on_the_origin_side(count: int) -> None:
+    split = -(-count // 2)
+    regions = slice_cells(uniform(count), Cell(0, 0, 1920, 1080), gap=33)
+    cut = max(r.x + r.w for r in regions[:split])
+    assert min(r.x for r in regions[split:]) >= cut
+
+
+def test_the_tie_break_is_the_largest_index_not_the_smallest() -> None:
+    """Falsifies "smallest wins": both k are minimal, and 2 must be chosen."""
+    assert _bisect_by_weight(weighted(1.0, 1.0, 1.0)) == 2
+
+
+def test_the_split_follows_the_weights_not_the_count() -> None:
+    """One heavy item balances two light ones, so the cut lands after it."""
+    assert _bisect_by_weight(weighted(2.0, 1.0, 1.0)) == 1
+
+
+def test_bisect_rejects_a_list_it_cannot_split() -> None:
+    with pytest.raises(PackingError):
+        _bisect_by_weight(uniform(1))
+
+
+# -- slice_cells: invariants across every N and both targets ------------------
+
+WEIGHT_VECTORS = [
+    None,  # uniform
+    "descending",  # 1.0, 0.9, 0.8, ...
+    "spiky",  # one dominant source
+]
+
+
+def weights_for(kind: str | None, count: int) -> list[WeightedSource]:
+    if kind is None:
+        return uniform(count)
+    if kind == "descending":
+        return [WeightedSource(f"sha{i}", 1.0 - 0.05 * i) for i in range(count)]
+    return [WeightedSource(f"sha{i}", 3.0 if i == 0 else 1.0) for i in range(count)]
+
+
+@pytest.mark.parametrize("kind", WEIGHT_VECTORS)
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+@pytest.mark.parametrize("target", [LANDSCAPE, UHD])
+def test_weighted_cells_in_bounds_and_at_least_one_pixel(
+    kind: str | None, count: int, target: tuple[int, int]
+) -> None:
+    tw, th = target
+    regions = slice_cells(
+        weights_for(kind, count), Cell(0, 0, tw, th), gap=gutter_for_target(target)
+    )
+    assert len(regions) == count
+    for region in regions:
+        assert region.w >= 1 and region.h >= 1
+        assert region.x >= 0 and region.y >= 0
+        assert region.x + region.w <= tw
+        assert region.y + region.h <= th
+
+
+@pytest.mark.parametrize("kind", WEIGHT_VECTORS)
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+@pytest.mark.parametrize("target", [LANDSCAPE, UHD])
+def test_weighted_cells_are_pairwise_disjoint(
+    kind: str | None, count: int, target: tuple[int, int]
+) -> None:
+    regions = slice_cells(
+        weights_for(kind, count), Cell(0, 0, *target), gap=gutter_for_target(target)
+    )
+    for i, a in enumerate(regions):
+        for b in regions[i + 1 :]:
+            assert not overlaps(a, b), (boxes([a]), boxes([b]))
+
+
+@pytest.mark.parametrize("kind", WEIGHT_VECTORS)
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+@pytest.mark.parametrize("target", [LANDSCAPE, UHD])
+def test_weighted_gutter_is_never_below_gap_at_any_depth(
+    kind: str | None, count: int, target: tuple[int, int]
+) -> None:
+    """Any two cells meet at some ancestor cut, whose gutter is >= gap."""
+    gap = gutter_for_target(target)
+    regions = slice_cells(weights_for(kind, count), Cell(0, 0, *target), gap=gap)
+    for i, a in enumerate(regions):
+        for b in regions[i + 1 :]:
+            horizontal = min(a.x + a.w, b.x + b.w) <= max(a.x, b.x)
+            vertical = min(a.y + a.h, b.y + b.h) <= max(a.y, b.y)
+            separation = max(
+                max(a.x, b.x) - min(a.x + a.w, b.x + b.w) if horizontal else 0,
+                max(a.y, b.y) - min(a.y + a.h, b.y + b.h) if vertical else 0,
+            )
+            assert separation >= gap, (boxes([a]), boxes([b]))
+
+
+@pytest.mark.parametrize("kind", WEIGHT_VECTORS)
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_weighted_output_order_equals_input_order(
+    kind: str | None, count: int
+) -> None:
+    items = weights_for(kind, count)
+    regions = slice_cells(items, Cell(0, 0, 1920, 1080), gap=33)
+    assert [r.source_sha256 for r in regions] == [item.sha for item in items]
+
+
+@pytest.mark.parametrize("count", [2, 5, 9])
+def test_weighted_repeat_calls_are_identical(count: int) -> None:
+    items = weights_for("descending", count)
+    first = slice_cells(items, Cell(0, 0, 1920, 1080), gap=33)
+    second = slice_cells(items, Cell(0, 0, 1920, 1080), gap=33)
+    assert first == second
+    assert [r.to_dict() for r in first] == [r.to_dict() for r in second]
+
+
+# -- weight hygiene (T-10-12: the weight vector is a trust boundary) ----------
+
+
+@pytest.mark.parametrize("weights", [(0.0, 0.0, 0.0), (-1.0, -2.0, -3.0)])
+def test_degenerate_weight_vectors_fall_back_to_uniform(
+    weights: tuple[float, ...]
+) -> None:
+    box = Cell(0, 0, 1920, 1080)
+    assert slice_cells(weighted(*weights), box, gap=33) == equal_cells(
+        shas(len(weights)), box, gap=33
+    )
+
+
+def test_non_finite_weights_are_clamped_rather_than_crashing() -> None:
+    """NaN / inf name no share of a canvas; they clamp to 0.0, never to a crash."""
+    box = Cell(0, 0, 1920, 1080)
+    assert slice_cells(
+        weighted(float("nan"), float("nan")), box, gap=33
+    ) == equal_cells(shas(2), box, gap=33)
+    regions = slice_cells(weighted(float("inf"), 1.0), box, gap=33)
+    assert [r.source_sha256 for r in regions] == ["sha0", "sha1"]
+    assert regions[0].w >= 1 and regions[1].w >= 1
+
+
+def test_a_partly_zero_weight_vector_still_tiles_in_bounds() -> None:
+    """A starved side keeps its 1px floor, and the gutter still holds at gap."""
+    regions = slice_cells(weighted(-1.0, 2.0), Cell(0, 0, 1920, 1080), gap=33)
+    assert regions[0].w >= 1
+    assert regions[1].x + regions[1].w <= 1920
+    assert regions[1].x - (regions[0].x + regions[0].w) >= 33
+
+
+def test_zero_items_raises() -> None:
+    with pytest.raises(PackingError):
+        slice_cells([], Cell(0, 0, 1920, 1080), gap=33)
+
+
+def test_unsplittable_box_raises_for_weighted_items_too() -> None:
+    with pytest.raises(PackingError) as exc:
+        slice_cells(weighted(1.0, 1.0), Cell(0, 0, 30, 30), gap=33)
+    assert "cannot split" in str(exc.value)

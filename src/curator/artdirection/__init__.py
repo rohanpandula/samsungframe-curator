@@ -22,9 +22,11 @@ from curator.artdirection.manifest import (
 from curator.artdirection.packing import (
     Cell,
     PackingError,
+    WeightedSource,
     equal_cells,
     gutter_for_target,
     resolve_regions,
+    slice_cells,
 )
 from curator.artdirection.policy import (
     ArtDirectionRequest,
@@ -47,10 +49,12 @@ __all__ = [
     "ProcessingIntent",
     "SourceRegion",
     "TreatmentProposal",
+    "WeightedSource",
     "equal_cells",
     "gutter_for_target",
     "materialize_manifest",
     "propose",
     "propose_treatments",
     "resolve_regions",
+    "slice_cells",
 ]
