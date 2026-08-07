@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from analysis_factory import (
@@ -17,9 +18,12 @@ from curator.artdirection.manifest import (
     MANIFEST_VERSION,
     ArtDirectionManifest,
     LayoutTreatment,
+    ManifestError,
 )
 from curator.artdirection.policy import (
+    _TREATMENT_RANK,
     DIPTYCH_AFFINITY,
+    NUP_AFFINITY,
     PANORAMIC_MIN_ASPECT,
     SQUARE_ASPECT_MAX,
     SQUARE_ASPECT_MIN,
@@ -205,3 +209,153 @@ def test_lifecycle_diptych() -> None:
     manifest = materialize_manifest(prop, req, ["a", "b"])
     assert manifest.pairing_order == ["a", "b"]
     assert manifest.rationale == prop.rationale
+
+
+# ---------------------------------------------------------------------------
+# M010/S02: named N-up templates (triptych / quad)
+# ---------------------------------------------------------------------------
+
+
+def _group(shas: list[str], affinity: float) -> list:
+    """One paired AnalysisResult per sha, all carrying *affinity*."""
+    return [paired_result(sha, affinity=affinity) for sha in shas]
+
+
+def test_triptych_proposed_at_three_sources_above_threshold() -> None:
+    """Three coherent sources rank a triptych — the first N-up template."""
+    shas = ["a", "b", "c"]
+    req = _request(shas)
+    proposals = propose_treatments(_group(shas, 0.9), req)
+    tri = _first(proposals, LayoutTreatment.TRIPTYCH)
+    assert tri is not None
+    assert tri.score == 0.9
+    assert tri.evidence["sources"] == 3
+    assert "3 sources" in tri.rationale[0]
+    assert f">= {NUP_AFFINITY}" in tri.rationale[0]
+
+
+def test_triptych_not_proposed_below_threshold() -> None:
+    """Below NUP_AFFINITY the group is not coherent enough for an N-up."""
+    shas = ["a", "b", "c"]
+    proposals = propose_treatments(
+        _group(shas, NUP_AFFINITY - 0.2), _request(shas)
+    )
+    assert _first(proposals, LayoutTreatment.TRIPTYCH) is None
+
+
+def test_quad_proposed_at_four_sources() -> None:
+    """Four coherent sources rank a quad, never a triptych."""
+    shas = ["a", "b", "c", "d"]
+    proposals = propose_treatments(_group(shas, 0.8), _request(shas))
+    quad = _first(proposals, LayoutTreatment.QUAD)
+    assert quad is not None
+    assert quad.evidence["sources"] == 4
+    assert len(quad.evidence["cells"]) == 4
+    assert _first(proposals, LayoutTreatment.TRIPTYCH) is None
+
+
+def test_five_sources_propose_no_named_template_yet() -> None:
+    """N=5 has no named template until M010/S03 adds PACKED."""
+    shas = ["a", "b", "c", "d", "e"]
+    proposals = propose_treatments(_group(shas, 0.95), _request(shas))
+    assert _first(proposals, LayoutTreatment.TRIPTYCH) is None
+    assert _first(proposals, LayoutTreatment.QUAD) is None
+
+
+def test_nup_ignores_allow_diptych_flag() -> None:
+    """``allow_diptych`` stays DIPTYCH-specific — it never gates an N-up."""
+    shas = ["a", "b", "c"]
+    proposals = propose_treatments(
+        _group(shas, 0.9), _request(shas, allow_diptych=False)
+    )
+    assert _first(proposals, LayoutTreatment.DIPTYCH) is None
+    assert _first(proposals, LayoutTreatment.TRIPTYCH) is not None
+
+
+def test_treatment_rank_covers_every_layout_treatment() -> None:
+    """The sort key is total: a rank-less treatment is a KeyError at sort time."""
+    assert set(_TREATMENT_RANK) == set(LayoutTreatment)
+    assert _TREATMENT_RANK[LayoutTreatment.DIPTYCH] < _TREATMENT_RANK[
+        LayoutTreatment.TRIPTYCH
+    ]
+    assert _TREATMENT_RANK[LayoutTreatment.TRIPTYCH] < _TREATMENT_RANK[
+        LayoutTreatment.QUAD
+    ]
+    # The four single-source members shifted by +3 but kept their relative order.
+    singles = [
+        LayoutTreatment.SINGLE_FULLBLEED,
+        LayoutTreatment.CONTAIN_MATTE,
+        LayoutTreatment.PANORAMIC,
+        LayoutTreatment.SQUARE,
+    ]
+    ranks = [_TREATMENT_RANK[t] for t in singles]
+    assert ranks == sorted(ranks)
+
+
+def test_nup_evidence_names_affinity_source_and_matches_manifest_cells() -> None:
+    """Evidence is machine-checkable and agrees with the materialized regions."""
+    shas = ["a", "b", "c"]
+    req = _request(shas)
+    proposals = propose_treatments(_group(shas, 0.9), req)
+    tri = _first(proposals, LayoutTreatment.TRIPTYCH)
+    assert tri is not None
+    assert tri.evidence["affinity_source"] == "pairing.affinity"
+    assert tri.evidence["group_affinity"] == 0.9
+    assert tri.evidence["pairwise_affinity"] == {"b": 0.9, "c": 0.9}
+    assert tri.evidence["cut_axis"] == "vertical"
+    assert tri.evidence["gap"] == 33
+
+    cells = tri.evidence["cells"]
+    assert len(cells) == 3
+    assert all(cell["w"] > 0 and cell["h"] > 0 for cell in cells)
+
+    manifest = materialize_manifest(tri, req, shas)
+    assert [
+        {
+            "sha": region.source_sha256,
+            "x": region.x,
+            "y": region.y,
+            "w": region.w,
+            "h": region.h,
+        }
+        for region in manifest.regions
+    ] == cells
+    assert manifest.pairing_order == shas
+    assert manifest.validate() is None
+
+
+def test_nup_evidence_roundtrips_through_json() -> None:
+    """A triptych proposal survives the proposals-table JSON round trip."""
+    shas = ["a", "b", "c"]
+    proposals = propose_treatments(_group(shas, 0.9), _request(shas))
+    tri = _first(proposals, LayoutTreatment.TRIPTYCH)
+    assert tri is not None
+    assert TreatmentProposal.from_dict(tri.to_dict()) == tri
+
+
+def test_materialize_rejects_diptych_with_three_sources() -> None:
+    """A fixed-size template with the wrong source count is rejected, not truncated."""
+    prop = TreatmentProposal(treatment=LayoutTreatment.DIPTYCH, score=0.9)
+    with pytest.raises(ManifestError) as excinfo:
+        materialize_manifest(prop, _request(["a", "b", "c"]), ["a", "b", "c"])
+    message = str(excinfo.value)
+    assert "exactly 2" in message
+    assert "got 3" in message
+    assert "never truncated" in message
+
+
+def test_materialize_rejects_triptych_with_two_sources() -> None:
+    """The same exact-count contract rejects an under-count triptych."""
+    prop = TreatmentProposal(treatment=LayoutTreatment.TRIPTYCH, score=0.9)
+    with pytest.raises(ManifestError):
+        materialize_manifest(prop, _request(["a", "b"]), ["a", "b"])
+
+
+def test_nup_deterministic_repeats() -> None:
+    """Identical N-up input yields an identical, identically-ordered result."""
+    shas = ["a", "b", "c", "d"]
+    results = _group(shas, 0.85)
+    req = _request(shas)
+    first = propose_treatments(results, req)
+    second = propose_treatments(results, req)
+    assert [p.to_dict() for p in first] == [p.to_dict() for p in second]

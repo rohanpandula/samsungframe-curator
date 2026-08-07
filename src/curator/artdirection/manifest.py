@@ -30,13 +30,22 @@ class ManifestError(CuratorError):
 
 
 class LayoutTreatment(Enum):
-    """How source content is placed on the frame surface."""
+    """How source content is placed on the frame surface.
+
+    Members serialize by ``.value``, so adding one is schema-compatible with the
+    current :data:`MANIFEST_VERSION` — M010/S02's ``TRIPTYCH`` / ``QUAD`` needed
+    no version bump. Adding a member *does* require a
+    ``policy._TREATMENT_RANK`` entry; that module fails loudly at import time
+    when one is missing.
+    """
 
     SINGLE_FULLBLEED = "single_fullbleed"
     CONTAIN_MATTE = "contain_matte"
     PANORAMIC = "panoramic"
     SQUARE = "square"
     DIPTYCH = "diptych"
+    TRIPTYCH = "triptych"
+    QUAD = "quad"
 
 
 _NESTED_DICT_FIELDS = {"background", "processing_intent"}
@@ -55,9 +64,26 @@ MAX_LAYOUT_SOURCES = 9
 #: Treatments that occupy more than one cell of the output canvas (M010/S01).
 #:
 #: The single place the "does this treatment need more than one cell?" question
-#: is answered. Only :attr:`LayoutTreatment.DIPTYCH` qualifies today; M010/S02
-#: and M010/S03 extend this set as named N-up templates land.
-MULTI_CELL_TREATMENTS: frozenset[LayoutTreatment] = frozenset({LayoutTreatment.DIPTYCH})
+#: is answered — read by ``policy.materialize_manifest`` (which cell order to
+#: record) and by ``renderer._render`` (which branch renders it). M010/S02 added
+#: the two named N-up templates; M010/S03 extends the set again with ``PACKED``.
+MULTI_CELL_TREATMENTS: frozenset[LayoutTreatment] = frozenset(
+    {LayoutTreatment.DIPTYCH, LayoutTreatment.TRIPTYCH, LayoutTreatment.QUAD}
+)
+
+#: How many sources each fixed-size named template requires, exactly (M010/S02).
+#:
+#: The single exact-count table both the policy engine
+#: (``materialize_manifest`` -> :class:`ManifestError`) and the renderer
+#: (``_multi_cell`` -> ``RenderError``) read, so "reject, never truncate" is
+#: enforced from one place rather than restated per layer. A treatment absent
+#: from this table has no fixed count — that is how a variable-width template
+#: (M010/S03's ``PACKED``) opts out.
+_TREATMENT_SOURCE_COUNT: dict[LayoutTreatment, int] = {
+    LayoutTreatment.DIPTYCH: 2,
+    LayoutTreatment.TRIPTYCH: 3,
+    LayoutTreatment.QUAD: 4,
+}
 
 
 @dataclass(frozen=True)

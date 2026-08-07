@@ -1,9 +1,12 @@
-"""Deterministic art-direction policy engine (M002/S03 T2+T3).
+"""Deterministic art-direction policy engine (M002/S03 T2+T3, M010/S02).
 
-Given one or two :class:`~curator.analysis.schema.AnalysisResult` fixtures and an
-:class:`ArtDirectionRequest`, :func:`propose_treatments` ranks which
+Given one or more :class:`~curator.analysis.schema.AnalysisResult` fixtures and
+an :class:`ArtDirectionRequest`, :func:`propose_treatments` ranks which
 :class:`~curator.artdirection.manifest.LayoutTreatment` choices are applicable
 and returns them as ``TreatmentProposal`` objects ordered by score descending.
+Single-source treatments read the primary result; the multi-source ones —
+DIPTYCH at two sources, TRIPTYCH at three and QUAD at four (M010/S02) — are
+gated on a cross-image affinity and carry their cell geometry as evidence.
 
 The policy is a pure, deterministic rules engine: identical analysis + request
 always yield an identical, identically-ordered list of proposals. It consumes
@@ -23,8 +26,10 @@ from typing import TYPE_CHECKING, Any
 
 from curator.analysis.schema import AnalysisResult
 from curator.artdirection.manifest import (
+    _TREATMENT_SOURCE_COUNT,
     MANIFEST_VERSION,
     MAX_LAYOUT_SOURCES,
+    MULTI_CELL_TREATMENTS,
     ArtDirectionManifest,
     BackgroundSpec,
     LayoutTreatment,
@@ -54,14 +59,47 @@ SQUARE_ASPECT_MAX = 1.25
 #: Minimum pair affinity to propose a diptych.
 DIPTYCH_AFFINITY = 0.75
 
+#: Minimum mean group affinity to propose a named N-up template (M010/S02).
+#:
+#: A **stated, revisable engineering default, not a researched number.** It sits
+#: below :data:`DIPTYCH_AFFINITY` (0.75) deliberately: an N-up reads as a wall
+#: and tolerates more variety than two adjacent panels, where any mismatch is
+#: read as a direct comparison between exactly two images.
+NUP_AFFINITY = 0.6
+
+#: Source count -> the named template that lays that many cells out (M010/S02).
+_NUP_TREATMENTS: dict[int, LayoutTreatment] = {
+    3: LayoutTreatment.TRIPTYCH,
+    4: LayoutTreatment.QUAD,
+}
+
 #: Fixed ordering used as a deterministic tie-break for equal scores.
+#:
+#: Multi-cell treatments rank ahead of the single-source ones, which shifted by
+#: +3 in M010/S02 but kept their **relative** order — the dict is only ever used
+#: as a relative sort key (see the sort in :func:`propose_treatments`), so no
+#: ordering assertion depends on the absolute numbers.
 _TREATMENT_RANK = {
     LayoutTreatment.DIPTYCH: 0,
-    LayoutTreatment.SINGLE_FULLBLEED: 1,
-    LayoutTreatment.CONTAIN_MATTE: 2,
-    LayoutTreatment.PANORAMIC: 3,
-    LayoutTreatment.SQUARE: 4,
+    LayoutTreatment.TRIPTYCH: 1,
+    LayoutTreatment.QUAD: 2,
+    LayoutTreatment.SINGLE_FULLBLEED: 3,
+    LayoutTreatment.CONTAIN_MATTE: 4,
+    LayoutTreatment.PANORAMIC: 5,
+    LayoutTreatment.SQUARE: 6,
 }
+
+# Completeness guard (M010/S02): a LayoutTreatment with no _TREATMENT_RANK entry
+# is a bare KeyError at sort time, arbitrarily far from the line that added it.
+# An explicit raise (never `assert`, which `python -O` strips) turns that into a
+# clear import-time failure naming exactly what is missing.
+_UNRANKED_TREATMENTS = frozenset(LayoutTreatment) - frozenset(_TREATMENT_RANK)
+if _UNRANKED_TREATMENTS:
+    raise RuntimeError(
+        "every LayoutTreatment needs a _TREATMENT_RANK entry (propose_treatments "
+        "sorts on it); missing: "
+        + ", ".join(sorted(member.name for member in _UNRANKED_TREATMENTS))
+    )
 
 
 @dataclass(frozen=True)
@@ -139,11 +177,17 @@ def propose_treatments(
     (one per source). ``provider`` is optional and, when supplied for a two-source
     request, is used to derive a real cross-image pairing affinity; otherwise the
     caller-supplied ``pairing.affinity`` of the first result is used.
+
+    Multi-source eligibility (M010/S02) is driven by ``n``, the number of sources
+    that have both an analysis result *and* a request entry: ``n == 2`` may yield
+    a DIPTYCH, ``n == 3`` a TRIPTYCH and ``n == 4`` a QUAD. Extra results beyond
+    the request's sources are never silently laid out.
     """
     results = [analysis] if isinstance(analysis, AnalysisResult) else list(analysis)
     if not results:
         return []
 
+    n = min(len(results), len(request.sources))
     primary = results[0]
     aspect = _aspect(primary)
     proposals: list[TreatmentProposal] = []
@@ -235,6 +279,10 @@ def propose_treatments(
                 )
             )
 
+    # ``allow_diptych`` stays DIPTYCH-specific (M010/S02): it is an existing
+    # public field of ArtDirectionRequest whose name states exactly one
+    # treatment, so the N-up block below deliberately does *not* read it rather
+    # than silently repurposing it as a general "multi-source allowed" flag.
     if (
         request.allow_diptych
         and len(results) >= 2
@@ -257,6 +305,15 @@ def propose_treatments(
                         "orientation_match": results[1].pairing.orientation_match,
                     },
                 )
+            )
+
+    nup_treatment = _NUP_TREATMENTS.get(n)
+    if nup_treatment is not None:
+        group = results[:n]
+        group_affinity = _group_affinity(group, provider)
+        if group_affinity >= NUP_AFFINITY:
+            proposals.append(
+                _nup_proposal(nup_treatment, group, request, provider, group_affinity)
             )
 
     proposals.sort(key=lambda p: (-p.score, _TREATMENT_RANK[p.treatment]))
@@ -311,8 +368,10 @@ def materialize_manifest(
 
     Raises :class:`~curator.artdirection.manifest.ManifestError` when more than
     :data:`~curator.artdirection.manifest.MAX_LAYOUT_SOURCES` sources are given,
-    rather than materializing a manifest :meth:`ArtDirectionManifest.validate`
-    would reject.
+    or when a fixed-size named template is handed the wrong number of sources
+    (M010/S02) — rather than materializing a manifest
+    :meth:`ArtDirectionManifest.validate` would reject, or one the renderer would
+    quietly truncate.
     """
     if len(sources_sha) > MAX_LAYOUT_SOURCES:
         raise ManifestError(
@@ -322,7 +381,13 @@ def materialize_manifest(
         )
     reasons = list(rationale) if rationale is not None else list(proposal.rationale)
     treatment = proposal.treatment
-    pairing_order = list(sources_sha) if treatment is LayoutTreatment.DIPTYCH else []
+    required = _TREATMENT_SOURCE_COUNT.get(treatment)
+    if required is not None and len(sources_sha) != required:
+        raise ManifestError(
+            f"{treatment.value} requires exactly {required} source(s), got "
+            f"{len(sources_sha)} — a count mismatch is rejected, never truncated"
+        )
+    pairing_order = list(sources_sha) if treatment in MULTI_CELL_TREATMENTS else []
     background = BackgroundSpec()
     if treatment is LayoutTreatment.CONTAIN_MATTE:
         choice = proposal.evidence.get("background_choice")
@@ -364,3 +429,105 @@ def _pair_affinity(
         except Exception:
             return float(results[0].pairing.affinity)
     return float(results[0].pairing.affinity)
+
+
+def _affinity_between(
+    primary: AnalysisResult, other: AnalysisResult, provider: Any | None
+) -> float:
+    """Return the affinity between *primary* and *other* (M010/S02).
+
+    Mirrors :func:`_pair_affinity`'s shape — a real cross-image score from
+    *provider* when one is supplied, falling back to the stored
+    ``pairing.affinity`` on any provider failure. The fallback is per comparison
+    and reads *other*'s recorded affinity, so one unanalyzed pair cannot poison
+    a whole group's score.
+    """
+    if provider is not None:
+        try:
+            return float(provider.pairing_scores_between(primary, other).affinity)
+        except Exception:
+            return float(other.pairing.affinity)
+    return float(other.pairing.affinity)
+
+
+def _pairwise_affinities(
+    results: list[AnalysisResult], provider: Any | None
+) -> list[float]:
+    """Return the affinity of ``results[0]`` against each of ``results[1:]``.
+
+    **N-1 comparisons, never N x N.** The primary is the fixed reference point,
+    so the cost is linear in the group size and no full affinity matrix is ever
+    materialized — the property a future whole-library grouping feature must
+    keep rather than rediscover.
+    """
+    return [_affinity_between(results[0], other, provider) for other in results[1:]]
+
+
+def _group_affinity(
+    results: list[AnalysisResult], provider: Any | None
+) -> float:
+    """Return the mean of :func:`_pairwise_affinities` (M010/S02).
+
+    The N-up eligibility signal: how well the group coheres around its primary.
+    Returns ``0.0`` for a group of one, which no N-up template accepts anyway.
+    Streaming by construction — see :func:`_pairwise_affinities` for why this is
+    N-1 comparisons and not an N x N matrix.
+    """
+    scores = _pairwise_affinities(results, provider)
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
+def _nup_proposal(
+    treatment: LayoutTreatment,
+    results: list[AnalysisResult],
+    request: ArtDirectionRequest,
+    provider: Any | None,
+    affinity: float,
+) -> TreatmentProposal:
+    """Build the TRIPTYCH/QUAD proposal for *results* under *request* (M010/S02).
+
+    ``evidence["cells"]`` is computed with the *same*
+    :func:`~curator.artdirection.packing.equal_cells` call
+    :func:`materialize_manifest` makes, so the proposal's advertised geometry and
+    the materialized manifest's regions agree by construction rather than by
+    convention. ``evidence["affinity_source"]`` names *which* affinity produced
+    the score — the analysis pipeline's ``pairing.affinity``, never an embedding
+    cosine (M010/S04 emits a different literal for its own question).
+    """
+    shas = list(request.sources[: len(results)])
+    target = (request.target_width, request.target_height)
+    gap = gutter_for_target(target)
+    cells = equal_cells(shas, Cell(0, 0, target[0], target[1]), gap=gap)
+    cut_axis = "vertical" if target[0] >= target[1] else "horizontal"
+    pairwise = dict(
+        zip(shas[1:], _pairwise_affinities(results, provider), strict=True)
+    )
+    return TreatmentProposal(
+        treatment=treatment,
+        rationale=[
+            f"{len(shas)} sources, mean group affinity {affinity:.2f} >= {NUP_AFFINITY}",
+            f"{len(shas)} equal cells on a {target[0]}x{target[1]} canvas, "
+            f"{cut_axis} cut, {gap}px gutter",
+        ],
+        score=round(affinity, 4),
+        evidence={
+            "sources": len(shas),
+            "group_affinity": affinity,
+            "affinity_source": "pairing.affinity",
+            "pairwise_affinity": pairwise,
+            "gap": gap,
+            "cut_axis": cut_axis,
+            "cells": [
+                {
+                    "sha": cell.source_sha256,
+                    "x": cell.x,
+                    "y": cell.y,
+                    "w": cell.w,
+                    "h": cell.h,
+                }
+                for cell in cells
+            ],
+        },
+    )
