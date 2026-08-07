@@ -852,6 +852,96 @@ def test_a_single_source_treatment_never_carries_a_crop() -> None:
     assert [r.crop for r in materialize_manifest(prop, req, ["only"]).regions] == [None]
 
 
+# ---------------------------------------------------------------------------
+# M010/S05 invariant: never an unsafe crop in any cell, at any N
+# ---------------------------------------------------------------------------
+
+
+def _passes_the_crop_gate(result) -> bool:
+    """Restate the gate independently, so the property test checks rather than echoes."""
+    safety = result.crop_safety
+    return (
+        safety.safe_north
+        and safety.safe_south
+        and safety.safe_east
+        and safety.safe_west
+        and min(
+            safety.margin_north,
+            safety.margin_south,
+            safety.margin_east,
+            safety.margin_west,
+        )
+        >= MIN_FULLBLEED_MARGIN
+    )
+
+
+def _mixed_sources(count: int) -> tuple[list[str], list]:
+    """*count* sources alternating crop-safe / crop-risky, plus one thin margin."""
+    shas = [f"s{i}" for i in range(count)]
+    results = []
+    for index, sha in enumerate(shas):
+        if index % 3 == 0:
+            results.append(crop_safe_result(sha))
+        elif index % 3 == 1:
+            results.append(crop_risky_result(sha, unsafe="east"))
+        else:
+            results.append(make_result(sha, margin_west=MIN_FULLBLEED_MARGIN - 0.02))
+    return shas, results
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_no_proposal_or_manifest_ever_crops_a_source_that_failed_its_gate(
+    count: int,
+) -> None:
+    """The contract, across every N in range and every multi-cell treatment.
+
+    Asserted on the **manifest** as well as the proposal, so a leak through
+    ``materialize_manifest`` is caught rather than only the propose-time verdict.
+    """
+    shas, results = _mixed_sources(count)
+    approved = {
+        sha: _passes_the_crop_gate(result)
+        for sha, result in zip(shas, results, strict=True)
+    }
+    assert not all(approved.values()), "the fixture must contain a risky source"
+
+    req = _request(shas)
+    proposals = propose_treatments(results, req)
+    multi_cell = [p for p in proposals if "cells" in p.evidence]
+    assert multi_cell, "an N-up proposal is expected at this affinity"
+
+    for proposal in multi_cell:
+        cells = proposal.evidence["cells"]
+        for cell in cells:
+            if cell["crop"] == CROP_FILL:
+                assert approved[cell["sha"]], (proposal.treatment, cell)
+        # A proposal this many sources can lay out must not leak on the way out.
+        if len(cells) != count:
+            continue
+        manifest = materialize_manifest(proposal, req, shas)
+        for region in manifest.regions:
+            if region.crop == CROP_FILL:
+                assert approved[region.source_sha256], (
+                    proposal.treatment,
+                    region,
+                )
+        assert manifest.validate() is None
+
+
+@pytest.mark.parametrize("count", [2, 3, 4, 5, 6, 7, 8, 9])
+def test_an_all_risky_group_never_crops_any_cell_at_any_n(count: int) -> None:
+    """The strongest form: no crop-safety approval anywhere means no fill anywhere."""
+    shas = [f"s{i}" for i in range(count)]
+    results = [crop_risky_result(sha) for sha in shas]
+    req = _request(shas)
+    for proposal in propose_treatments(results, req):
+        cells = proposal.evidence.get("cells", [])
+        assert all(cell["crop"] is None for cell in cells), proposal.treatment
+        if len(cells) == count:
+            manifest = materialize_manifest(proposal, req, shas)
+            assert all(region.crop is None for region in manifest.regions)
+
+
 def test_the_fit_decision_is_deterministic() -> None:
     shas = ["a", "b", "c", "d"]
     results = [

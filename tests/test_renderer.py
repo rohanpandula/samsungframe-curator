@@ -862,6 +862,60 @@ def test_a_1080p_fill_manifest_still_fills_when_repacked_for_4k() -> None:
     assert img.getpixel((int(regions[1].x), int(regions[1].y))) == (0, 0, 0)
 
 
+# -- M010/S05 invariant: never a silent upscale in any cell, at either target --
+
+
+#: Two ways one cell can outgrow its box, and the source size that does it.
+#:
+#: ``fit`` — a small source letterboxed into a cell it cannot fill: the min-based
+#: fit scale exceeds 1. ``fill`` — a wide, short source **cropped** to fill: the
+#: fit scale is below 1 and only the max-based fill scale exceeds 1, so this leg
+#: is what proves ``any(per_cell_upscaled)`` sees the crop path's scale too.
+_UPSCALE_PATHS = {"fit": ((200, 150), None), "fill": ((2000, 400), "fill")}
+
+
+@pytest.mark.parametrize("path", ["fit", "fill"])
+@pytest.mark.parametrize("target", [(1920, 1080), (3840, 2160)])
+def test_exactly_one_upscaling_cell_blocks_the_render_until_approved(
+    path, target
+) -> None:
+    """R008 fires once per manifest, and it sees both fit and fill scales."""
+    (small_w, small_h), crop = _UPSCALE_PATHS[path]
+    crops = [crop, None, None, None]
+
+    def build(width: int, height: int, *, approved: bool) -> tuple:
+        src, order = _packed_sources(3, width=3200, height=2400)
+        sha, data = make_source(width, height, color=(10, 20, 30))
+        src[sha] = data
+        return (
+            _fit_manifest(
+                LayoutTreatment.QUAD,
+                [sha, *order],
+                crops,
+                target=target,
+                upscale_warning=approved,
+            ),
+            src,
+        )
+
+    blocked, src = build(small_w, small_h, approved=False)
+    with pytest.raises(RenderError) as excinfo:
+        renderer.render(blocked, src, target)
+    message = str(excinfo.value)
+    assert "R008" in message
+    assert "upscale" in message
+
+    approved, src = build(small_w, small_h, approved=True)
+    result = renderer.render(approved, src, target)
+    assert result.upscaled_warning is True
+    assert (result.target_width, result.target_height) == target
+
+    # The offending cell is the *only* cause: swap its source for a large one and
+    # the identical manifest shape renders with no approval at all.
+    control, src = build(3200, 2400, approved=False)
+    assert renderer.render(control, src, target).upscaled_warning is False
+
+
 def test_packed_over_the_cap_is_rejected_before_any_decode() -> None:
     """The cap fires in validate(), _render's first statement — zero Pillow work.
 
