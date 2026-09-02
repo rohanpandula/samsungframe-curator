@@ -250,12 +250,9 @@ def select_group(
     returns an unavailable :class:`GroupSelection` with a non-empty ``reason``.
 
     ``embedding_store.get_matrix(model_version)`` is the **only** retrieval path.
-    That version scoping (plus
-    :func:`~curator.taste.embedding.store.cosine_similarity`'s
-    :class:`~curator.taste.embedding.errors.EmbeddingVersionError`) is the only
-    mechanism that can detect a cross-checkpoint mismatch — two 512-dim vectors
-    from different checkpoints are indistinguishable by shape — so no path here
-    bypasses it (T-10-17).
+    That version scoping is the only mechanism that can prevent a
+    cross-checkpoint mismatch — two 512-dim vectors from different checkpoints
+    are indistinguishable by shape — so no path here bypasses it (T-10-17).
     """
     if len(candidate_pool) > MAX_CANDIDATE_POOL:
         raise GroupingError(

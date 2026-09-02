@@ -45,8 +45,8 @@ from curator.hashing import sha256_hex
 from curator.taste.embedding.errors import EmbeddingUnavailableError
 
 #: Pinned checkpoint + revision this provider's vectors are versioned against.
-#: Comparing vectors across different values of this string is a bug
-#: (see :func:`curator.taste.embedding.store.cosine_similarity`).
+#: Comparing vectors across different values of this string is a bug — every
+#: :class:`~curator.taste.embedding.store.EmbeddingStore` read is scoped by it.
 EMBEDDING_MODEL_VERSION = "clip-vit-b-32-laion2b-1"
 
 #: Output vector dimensionality for :data:`EMBEDDING_MODEL_VERSION`.

@@ -5,9 +5,9 @@
 new ``content_embeddings`` table (schema v17) — the first BLOB column in this
 schema. Vectors are keyed by ``(sha256, model_version)`` so a model upgrade
 appends a new row rather than silently overwriting or colliding with the old
-one; :func:`cosine_similarity` refuses to compare vectors from different
-``model_version`` values rather than returning a plausible-looking but
-meaningless float (T-09-07).
+one, and every read (:meth:`EmbeddingStore.get`/:meth:`EmbeddingStore.get_matrix`)
+is scoped by ``model_version`` so vectors from different checkpoints can never
+meet in a comparison (T-09-07).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from curator.catalog import Catalog
-from curator.taste.embedding.errors import EmbeddingError, EmbeddingVersionError
+from curator.taste.embedding.errors import EmbeddingError
 from curator.taste.embedding.provider import EMBEDDING_DIM
 
 # ISO-8601 UTC timestamp used for the column this module writes explicitly
@@ -122,27 +122,3 @@ class EmbeddingStore:
         matrix = np.stack([np.frombuffer(blob, dtype=np.float32) for _, blob in rows])
         return shas, matrix
 
-
-def cosine_similarity(a: StoredEmbedding, b: StoredEmbedding) -> float:
-    """Return the cosine similarity between two embeddings.
-
-    Raises :class:`EmbeddingVersionError` when *a* and *b* come from different
-    ``model_version`` values — a mismatched pair never silently returns a
-    plausible-but-meaningless float (T-09-07).
-
-    A zero-norm vector (IN-01 —
-    :meth:`~curator.taste.embedding.provider.OnnxEmbeddingProvider.embed` can
-    return one rather than dividing by zero at the source) has no meaningfully
-    defined direction to compare, so either side being zero-norm returns
-    ``0.0`` ("no similarity") rather than ``NaN`` from a zero-by-zero division.
-    """
-    if a.model_version != b.model_version:
-        raise EmbeddingVersionError(
-            f"cannot compare embeddings from different model versions: "
-            f"{a.model_version!r} vs {b.model_version!r}"
-        )
-    norm_a = float(np.linalg.norm(a.vector))
-    norm_b = float(np.linalg.norm(b.vector))
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return float(np.dot(a.vector, b.vector) / (norm_a * norm_b))

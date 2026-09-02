@@ -14,8 +14,9 @@ drives the subsystem objects directly (``TasteVoteStore``, ``OnnxEmbeddingProvid
 * Scenario B (R040) — embedding provider: the committed tiny fixture ONNX model only,
   never a real checkpoint, never a network call anywhere in this file; ``embed()`` is
   bit-identical on repeat calls; a missing model reports ``probe().ok is False``
-  cleanly, never an exception; a cross-``model_version`` comparison raises
-  ``EmbeddingVersionError`` rather than returning a plausible-looking float.
+  cleanly, never an exception; every store read is scoped by ``model_version``
+  (``get``/``get_matrix``), so a vector from another checkpoint never enters a
+  comparison.
 * Scenario C (R041) — head: the explicit, exact-equality zero-vote parity assertion
   (mirrors ``tests/test_taste_dialogue_upstream.py``'s
   ``test_every_consumer_degrades_to_baseline_on_an_empty_profile``'s exact-``==``
@@ -45,7 +46,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pytest
 from PIL import Image
 
 import curator.taste.embedding.attribution as attribution_module
@@ -54,10 +54,9 @@ from curator.analysis.schema import AnalysisResult, ColorStory, QualitySignals
 from curator.catalog import Catalog
 from curator.taste.embedding.attribution import attribute_score, find_exemplars
 from curator.taste.embedding.compare import MIN_DISCORDANT_PAIRS, HeadComparison, compare_heads
-from curator.taste.embedding.errors import EmbeddingVersionError
 from curator.taste.embedding.head import VoteVectors, fit_embedding_head
 from curator.taste.embedding.provider import EMBEDDING_DIM, OnnxEmbeddingProvider
-from curator.taste.embedding.store import EmbeddingStore, cosine_similarity
+from curator.taste.embedding.store import EmbeddingStore
 from curator.taste.pairwise import Scorer
 from curator.taste.profiles import TasteProfileKind, default_profile
 from curator.taste.store import TasteVoteStore, next_pair
@@ -244,12 +243,13 @@ def test_acceptance_taste_embedding_provider_fixture_only_and_version_guarded(
         embed_store = EmbeddingStore(catalog)
         embed_store.set(sha, "acceptance-v1", v1)
         embed_store.set(sha, "acceptance-v2", v1)
-        stored_v1 = embed_store.get(sha, "acceptance-v1")
-        stored_v2 = embed_store.get(sha, "acceptance-v2")
-        assert stored_v1 is not None
-        assert stored_v2 is not None
-        with pytest.raises(EmbeddingVersionError):
-            cosine_similarity(stored_v1, stored_v2)
+        # Version scoping is the cross-checkpoint guard: one row per version,
+        # never both, and an unknown version reads back nothing.
+        shas_v1, matrix_v1 = embed_store.get_matrix("acceptance-v1")
+        shas_v2, _matrix_v2 = embed_store.get_matrix("acceptance-v2")
+        assert shas_v1 == [sha] and shas_v2 == [sha]
+        assert matrix_v1.shape == (1, EMBEDDING_DIM)
+        assert embed_store.get(sha, "acceptance-v3") is None
     finally:
         catalog.db.close()
 

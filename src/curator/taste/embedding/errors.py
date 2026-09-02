@@ -5,9 +5,11 @@ derives from the repo-wide :class:`~curator.errors.CuratorError` so callers can
 catch a single base. :class:`EmbeddingUnavailableError` is raised whenever the
 provider cannot honestly produce a vector (model absent, checksum mismatch, or a
 corrupt/unloadable file) — it never falls back to a silent zero vector.
-:class:`EmbeddingVersionError` guards every cross-``model_version`` comparison,
-mirroring :class:`~curator.analysis.errors.SchemaVersionError`'s "reject rather
-than silently mismatch" posture.
+
+Cross-``model_version`` safety needs no error class: every read in
+:mod:`curator.taste.embedding.store` (``get``/``get_matrix``) is scoped by
+``model_version`` at the SQL layer, so a vector from another checkpoint can
+never enter a comparison in the first place (M009/M010 audit, 2026-09-02).
 """
 
 from __future__ import annotations
@@ -27,11 +29,3 @@ class EmbeddingUnavailableError(EmbeddingError):
     never silently returns a zero vector in place of a real one.
     """
 
-
-class EmbeddingVersionError(EmbeddingError):
-    """Raised when comparing embeddings computed under different model versions.
-
-    A vector's numbers are only meaningful relative to the checkpoint that
-    produced them; comparing across ``model_version`` values would return a
-    plausible-looking but meaningless float if this guard did not exist.
-    """

@@ -601,9 +601,9 @@ CREATE INDEX IF NOT EXISTS idx_taste_preferences_vote_group
 # new row per content hash rather than silently overwriting or colliding with
 # vectors from a different checkpoint. There is no dimension-based way to detect
 # a cross-model-version comparison (two 512-dim vectors from different
-# checkpoints look identical in shape), so every comparison in
-# src/curator/taste/embedding/store.py asserts matching model_version and raises
-# EmbeddingVersionError before computing anything.
+# checkpoints look identical in shape), so every read in
+# src/curator/taste/embedding/store.py (get / get_matrix) is scoped by
+# model_version at the SQL layer — a cross-version pair can never be formed.
 #
 # - ``sha256``        — the content hash the vector was computed from (FK to
 #   ``content``, CASCADE delete — a vector never outlives its content row).

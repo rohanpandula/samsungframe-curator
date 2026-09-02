@@ -19,9 +19,9 @@ from PIL import Image, ImageDraw
 from curator.analysis.compute import ComputeBackend
 from curator.catalog import Catalog
 from curator.hashing import sha256_hex
-from curator.taste.embedding.errors import EmbeddingUnavailableError, EmbeddingVersionError
+from curator.taste.embedding.errors import EmbeddingUnavailableError
 from curator.taste.embedding.provider import EMBEDDING_DIM, OnnxEmbeddingProvider
-from curator.taste.embedding.store import EmbeddingStore, StoredEmbedding, cosine_similarity
+from curator.taste.embedding.store import EmbeddingStore
 
 FIXTURE_MODEL = Path(__file__).parent / "fixtures" / "tiny_embedding_model.onnx"
 
@@ -209,37 +209,27 @@ def test_get_matrix_empty_version_returns_correctly_shaped_empty(catalog: Catalo
 
 
 # ---------------------------------------------------------------------------
-# cosine_similarity / version guard
+# version scoping — the production cross-model_version guard
 # ---------------------------------------------------------------------------
 
 
-def test_cosine_similarity_version_mismatch_raises() -> None:
-    v = np.ones((EMBEDDING_DIM,), dtype=np.float32)
-    a = StoredEmbedding(
-        sha256="a" * 64, model_version="v1", dim=EMBEDDING_DIM, vector=v, created_at=""
-    )
-    b = StoredEmbedding(
-        sha256="b" * 64, model_version="v2", dim=EMBEDDING_DIM, vector=v, created_at=""
-    )
-    with pytest.raises(EmbeddingVersionError):
-        cosine_similarity(a, b)
+def test_get_matrix_never_mixes_model_versions(catalog: Catalog) -> None:
+    """The same sha stored under two checkpoints reads back one row per version.
 
-
-def test_cosine_similarity_same_version_computes() -> None:
-    v1 = np.array([1.0, 0.0], dtype=np.float32)
-    v2 = np.array([0.0, 1.0], dtype=np.float32)
-    a = StoredEmbedding(sha256="a" * 64, model_version="v1", dim=2, vector=v1, created_at="")
-    b = StoredEmbedding(sha256="b" * 64, model_version="v1", dim=2, vector=v2, created_at="")
-    assert cosine_similarity(a, b) == pytest.approx(0.0, abs=1e-6)
-    assert cosine_similarity(a, a) == pytest.approx(1.0, abs=1e-6)
-
-
-def test_cosine_similarity_zero_vector_returns_zero_not_nan() -> None:
-    """IN-01: a zero-norm vector on either side has no defined direction — must
-    return 0.0 ("no similarity"), never NaN from a zero-by-zero division."""
-    zero = np.zeros(2, dtype=np.float32)
-    v1 = np.array([1.0, 0.0], dtype=np.float32)
-    a = StoredEmbedding(sha256="a" * 64, model_version="v1", dim=2, vector=zero, created_at="")
-    b = StoredEmbedding(sha256="b" * 64, model_version="v1", dim=2, vector=v1, created_at="")
-    assert cosine_similarity(a, b) == 0.0
-    assert cosine_similarity(a, a) == 0.0
+    This is the guard every similarity path (head fitting, exemplars, grouping)
+    relies on: a read is scoped by ``model_version`` at the SQL layer, so a
+    vector from another checkpoint can never enter a comparison.
+    """
+    sha = "a" * 64
+    catalog.db.execute("INSERT INTO content(sha256, size) VALUES (?, ?)", (sha, 1))
+    catalog.db.commit()
+    store = EmbeddingStore(catalog)
+    store.set(sha, "v1", np.ones((EMBEDDING_DIM,), dtype=np.float32))
+    store.set(sha, "v2", np.zeros((EMBEDDING_DIM,), dtype=np.float32))
+    shas_v1, matrix_v1 = store.get_matrix("v1")
+    shas_v2, matrix_v2 = store.get_matrix("v2")
+    assert shas_v1 == [sha] and shas_v2 == [sha]
+    assert matrix_v1.shape == (1, EMBEDDING_DIM)
+    assert float(matrix_v1.sum()) == float(EMBEDDING_DIM)
+    assert float(matrix_v2.sum()) == 0.0
+    assert store.get(sha, "v3") is None
