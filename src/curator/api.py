@@ -64,7 +64,6 @@ from __future__ import annotations
 import base64
 import binascii
 import dataclasses
-import json
 import re
 import tempfile
 from collections.abc import Callable, Sequence
@@ -75,7 +74,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, Response
 
 from curator.analysis.cli_utils import resolve_catalog_entry
 from curator.analysis.errors import AnalysisError, CatalogEntryNotFound
@@ -94,6 +93,7 @@ from curator.artdirection.policy import ArtDirectionRequest, propose_treatments
 from curator.catalog import Catalog
 from curator.connectors.local import LocalConnector
 from curator.consolidate.plan import build_plan
+from curator.dest.simulator import SimulatorDestinationAdapter
 from curator.errors import CuratorError, StorageError
 from curator.hashing import sha256_hex
 from curator.ingest.pipeline import IngestPipeline
@@ -137,6 +137,18 @@ from curator.taste.embedding.store import EmbeddingStore
 from curator.taste.pairwise import Scorer
 from curator.taste.rank import TasteRanker
 from curator.taste.store import TasteVoteStore, VoteRecord, next_pair, resolve_vote_candidates
+from curator.wall import (
+    OUTPUT_TARGETS,
+    JobRunner,
+    cached_thumbnail,
+    clamp_thumb_side,
+    destinations,
+    load_folder,
+    publish_approved,
+    record_render,
+    score_unscored,
+    wall_state,
+)
 
 # Loopback-only bind address (MEM003): never expose the API on a LAN interface.
 HOST = "127.0.0.1"
@@ -168,6 +180,28 @@ class ReviewActionRequest(BaseModel):
     asset: str
     rationale: str = ""
     entry_id: int | None = None
+
+
+class WallLoadRequest(BaseModel):
+    """``POST /api/load`` — ingest a local folder as a background job (M011/S01)."""
+
+    path: str
+    wait: bool = False
+
+
+class WallScoreRequest(BaseModel):
+    """``POST /api/score`` — score every unscored photo as a background job (M011/S01)."""
+
+    wait: bool = False
+
+
+class WallPublishRequest(BaseModel):
+    """``POST /api/publish`` — hang every approved photo on a destination (M011/S01)."""
+
+    destination: str = "folder"
+    output: str = "1080p"
+    folder: str | None = None
+    wait: bool = False
 
 
 class AnalyzeRequest(BaseModel):
@@ -345,6 +379,10 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         version="0.1.0",
     )
     app.state.catalog = catalog
+    # One Wall (M011/S01): the in-process job runner and the per-process simulator
+    # destination, so 'hung on the simulator' persists for the server's lifetime.
+    app.state.wall_jobs = JobRunner()
+    app.state.wall_simulator = SimulatorDestinationAdapter()
 
     # -- helpers ---------------------------------------------------------------
 
@@ -483,7 +521,7 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
     # -- analyze / propose / render / validate surfaces --------------------------
 
     #: Well-known render targets: name -> (width, height).
-    TARGETS: dict[str, tuple[int, int]] = {"1080p": (1920, 1080), "4k": (3840, 2160)}
+    TARGETS = OUTPUT_TARGETS
     _SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
 
     def _decode_b64(text: str) -> bytes:
@@ -548,6 +586,102 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
                 detail=f"unknown profile {name!r}; expected one of "
                 f"{sorted(p.value for p in AnalysisProfile)}",
             ) from None
+
+    # -- one wall (M011/S01) -----------------------------------------------------
+
+    def _data_root(request: Request) -> Path:
+        return Path(_catalog(request).content.root)
+
+    def _wall_jobs(request: Request) -> JobRunner:
+        return request.app.state.wall_jobs
+
+    @app.get("/api/thumb/{sha}")
+    def thumb(sha: str, request: Request, w: int | None = None) -> Response:
+        """A cached JPEG thumbnail of stored content *sha*; ``w`` bounds the long side."""
+        if not re.fullmatch(r"[0-9a-f]{64}", sha):
+            raise HTTPException(status_code=400, detail="sha must be 64 lowercase hex chars")
+        try:
+            data = cached_thumbnail(
+                _data_root(request), _catalog(request).content, sha, clamp_thumb_side(w)
+            )
+        except StorageError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except CuratorError as exc:
+            raise HTTPException(status_code=415, detail=str(exc)) from exc
+        return Response(
+            content=data,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    @app.get("/api/wall")
+    def wall(request: Request) -> dict:
+        """Everything the one-page flow needs in one call: entries, counts, jobs, destinations."""
+        state = wall_state(_catalog(request))
+        jobs = _wall_jobs(request)
+        state["jobs"] = {name: jobs.status(name).to_dict() for name in ("load", "score", "publish")}
+        state["destinations"] = destinations(_data_root(request))
+        return state
+
+    @app.post("/api/load")
+    def wall_load(body: WallLoadRequest, request: Request) -> dict:
+        """Ingest a local folder as the ``load`` job; returns the job status."""
+        root = _data_root(request)
+        return _wall_jobs(request).start(
+            "load", lambda progress: load_folder(root, body.path, progress), wait=body.wait
+        ).to_dict()
+
+    @app.get("/api/load")
+    def wall_load_status(request: Request) -> dict:
+        return _wall_jobs(request).status("load").to_dict()
+
+    @app.post("/api/score")
+    def wall_score(body: WallScoreRequest, request: Request) -> dict:
+        """Score every unscored photo as the ``score`` job; returns the job status."""
+        root = _data_root(request)
+        return _wall_jobs(request).start(
+            "score", lambda progress: score_unscored(root, progress), wait=body.wait
+        ).to_dict()
+
+    @app.get("/api/score")
+    def wall_score_status(request: Request) -> dict:
+        return _wall_jobs(request).status("score").to_dict()
+
+    @app.post("/api/publish")
+    def wall_publish(body: WallPublishRequest, request: Request) -> dict:
+        """Hang every approved photo on *destination* as the ``publish`` job.
+
+        An unknown output or an unavailable destination is a 400 up front (with
+        the destination's own reason), never a job that fails later.
+        """
+        root = _data_root(request)
+        if body.output not in OUTPUT_TARGETS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown output {body.output!r} (known: {', '.join(OUTPUT_TARGETS)})",
+            )
+        offered = {d["id"]: d for d in destinations(root)}
+        chosen = offered.get(body.destination)
+        if chosen is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown destination {body.destination!r} (known: {', '.join(offered)})",
+            )
+        if not chosen["available"]:
+            raise HTTPException(status_code=400, detail=chosen["reason"])
+        simulator = request.app.state.wall_simulator
+        return _wall_jobs(request).start(
+            "publish",
+            lambda progress: publish_approved(
+                root, body.destination, body.output, progress,
+                folder=body.folder, simulator=simulator,
+            ),
+            wait=body.wait,
+        ).to_dict()
+
+    @app.get("/api/publish")
+    def wall_publish_status(request: Request) -> dict:
+        return _wall_jobs(request).status("publish").to_dict()
 
     @app.post("/api/analyze")
     def analyze(body: AnalyzeRequest, request: Request) -> dict:
@@ -639,25 +773,8 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         result: RenderResult,
         artifact_sha: str,
     ) -> None:
-        """Persist one render row into the ``renders`` table (append-only)."""
-        entry_id: int | None = None
-        if manifest.sources:
-            for entry in catalog.get_by_hash(manifest.sources[0]):
-                entry_id = entry["id"]
-                break
-        catalog.db.execute(
-            "INSERT INTO renders"
-            " (catalog_entry_id, target, renderer_version, artifact_sha, render_json)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (
-                entry_id,
-                target_label,
-                result.renderer_version,
-                artifact_sha,
-                json.dumps(result.to_dict()),
-            ),
-        )
-        catalog.db.commit()
+        """Persist one render row (shared with the publish job — M011/S01)."""
+        record_render(catalog, manifest, target_label, result, artifact_sha)
 
     def _target_label(
         body: RenderRequest, target: tuple[int, int]

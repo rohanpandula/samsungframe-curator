@@ -149,10 +149,17 @@ class PublishCoordinator:
         self.db.commit()
 
     def _last_row(self, artifact_id: str) -> dict[str, Any] | None:
+        """The newest journal row for *artifact_id* **on this adapter**.
+
+        Scoped by ``adapter_id`` (M011/S01): an artifact hangs on a destination,
+        so "already applied on the simulator" must never make the same artifact
+        id skip on a folder — before this, the first wall published anywhere made
+        every other destination report ``skipped`` for the same file names.
+        """
         row = self.db.execute(
             f"SELECT {_JOURNAL_COLUMNS} FROM dest_journal"
-            " WHERE artifact_id = ? ORDER BY id DESC LIMIT 1",
-            (artifact_id,),
+            " WHERE artifact_id = ? AND adapter_id = ? ORDER BY id DESC LIMIT 1",
+            (artifact_id, self.adapter_id),
         ).fetchone()
         if row is None:
             return None

@@ -214,7 +214,9 @@ def test_textured_image_analyzes_in_seconds_not_minutes() -> None:
     buf = io.BytesIO()
     frame.save(buf, format="PNG")
     started = time.perf_counter()
-    LocalAnalysisProvider().analyze(buf.getvalue(), AnalysisProfile.BALANCED, asset_id="noise")
+    LocalAnalysisProvider().analyze(
+        buf.getvalue(), AnalysisProfile.BALANCED, asset_id="noise"
+    )
     assert time.perf_counter() - started < 15.0
 
 
@@ -235,6 +237,8 @@ def test_large_frames_are_analyzed_at_the_working_resolution() -> None:
 
     buf = io.BytesIO()
     big.save(buf, format="PNG")
-    result = LocalAnalysisProvider().analyze(buf.getvalue(), AnalysisProfile.BALANCED, asset_id="big")
+    result = LocalAnalysisProvider().analyze(
+        buf.getvalue(), AnalysisProfile.BALANCED, asset_id="big"
+    )
     assert result.quality.resolution_sufficient is True  # judged on 5000x3000, not 2048x1228
     assert result.metadata.engine_version == "local-1.1.0"

@@ -321,3 +321,32 @@ def test_dest_journal_entry_ignores_unknown_keys():
     )
     assert entry.artifact_id == "a"
     assert not hasattr(entry, "bogus")
+
+
+def test_journal_idempotency_is_scoped_per_adapter(tmp_path) -> None:
+    """M011/S01: the same artifact id on two destinations applies on both.
+
+    Before the fix, "applied on the simulator" made a later folder publish of the
+    same artifact id report ``skipped`` — the journal lookup ignored adapter_id.
+    """
+    from curator.db import connect, migrate
+    from curator.dest.filesystem import FilesystemDestinationAdapter
+    from curator.dest.publish import PublishCoordinator
+    from curator.dest.simulator import SimulatorDestinationAdapter
+
+    db = connect(tmp_path / "root")
+    migrate(db)
+    data = b"same-bytes"
+    first = PublishCoordinator(SimulatorDestinationAdapter(), db, adapter_id="sim").publish(
+        "wall-001.png", data
+    )
+    second = PublishCoordinator(
+        FilesystemDestinationAdapter(tmp_path / "usb"), db, adapter_id="folder"
+    ).publish("wall-001.png", data)
+    assert first.skipped is False and second.skipped is False
+    assert (tmp_path / "usb" / "wall-001.png").read_bytes() == data
+    # Re-publishing on the folder alone is still idempotent.
+    third = PublishCoordinator(
+        FilesystemDestinationAdapter(tmp_path / "usb"), db, adapter_id="folder"
+    ).publish("wall-001.png", data)
+    assert third.skipped is True
