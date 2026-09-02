@@ -22,6 +22,11 @@ turn that on yourself.
 - **Suggests how to show them.** It proposes a layout for each photo, such as
   full-bleed, matted, panoramic, square, or a two-photo diptych, and explains
   why.
+- **Packs several photos into one frame.** Hand it 2 to 9 photos and it proposes
+  a triptych, a quad, or a weighted `packed` grid, with every cell's geometry and
+  crop decision written down. Same photos, same weights, same seed: the same
+  pixels, every time. It can also suggest which photos belong together, using
+  the local image model.
 - **Renders Frame-ready files.** One choice produces an exact 1080p or 4K
   image. Nothing is ever upscaled or cropped without you knowing.
 - **Approve before it's used.** Approve, reject, undo, and batch-review photos.
@@ -50,6 +55,11 @@ turn that on yourself.
   Approved output never changes.
 - **Taste Lens Discovery.** A calm place to find new art: a feed from painters
   and photographers with artist spotlights and a Familiar ↔ Surprising dial.
+- **Taste Deck.** Pick between two photos, anywhere: CLI, API, or the web app.
+  Votes feed a small learned head over a local, offline image model whose only
+  parameters are your votes. Every learned score opens to the votes that produced
+  it, and the head-to-head against the hand-built ranking reports an interval,
+  never a coin flip. The original engine is never retired automatically.
 
 ## Getting started
 
@@ -77,11 +87,17 @@ curator scan PATH                    # compare a folder to the catalog
 curator health                       # check the catalog
 curator analyze PATH                 # score photos
 curator propose ASSET                # suggest a layout
+curator propose A B C --weights 2,1,1   # suggest a multi-photo layout (2-9 photos)
+curator group SEED                   # which photos belong with this one (needs the local model)
 curator manifest ASSET               # make an art-direction file
+curator manifest A B C --treatment packed   # a specific multi-photo layout
 curator render ASSET --target 4k     # render an image
 curator validate FILE ...            # check a rendered file
 curator review                       # see approvals
 curator review approve ASSET         # approve a photo
+curator taste vote                   # pick between two photos (also: votes, retract)
+curator taste embed-status --backfill   # check or compute local image vectors
+curator taste compare                # learned head vs. hand-built ranking, with uncertainty
 curator headless start               # run the server
 ```
 
