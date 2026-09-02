@@ -26,6 +26,7 @@ from curator.taste.embedding.grouping import (
     GroupingError,
     GroupSelection,
     resolve_group_pool,
+    resolve_group_sources,
     select_group,
 )
 from curator.taste.embedding.provider import (
@@ -57,6 +58,7 @@ __all__ = [
     "StoredEmbedding",
     "resolve_expected_sha256",
     "resolve_group_pool",
+    "resolve_group_sources",
     "resolve_model_path",
     "select_group",
 ]

@@ -128,6 +128,7 @@ from curator.taste.embedding.grouping import (
     MAX_CANDIDATE_POOL,
     GroupingError,
     resolve_group_pool,
+    resolve_group_sources,
     select_group,
 )
 from curator.taste.embedding.head import VoteVectors, fit_embedding_head, resolve_vote_vectors
@@ -1119,8 +1120,9 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         Answers *which* images to group, never how they are arranged — the
         geometry stays in :mod:`curator.artdirection`, which imports nothing from
         ``taste``. Returns the byte-identical JSON shape ``curator group --json``
-        prints (``GroupSelection.to_dict()``), the house convention for a feature
-        that ships on both surfaces.
+        prints (``GroupSelection.to_dict()`` plus ``sources``, the ``curator
+        propose`` argument list), the house convention for a feature that ships
+        on both surfaces.
 
         An **unavailable** selection — nothing embedded yet, no candidate above
         the threshold — is a normal ``200`` with ``available: false`` and a
@@ -1156,7 +1158,10 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
             )
         except GroupingError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return selection.to_dict()
+        return {
+            **selection.to_dict(),
+            "sources": resolve_group_sources(catalog, seed_entry_id, selection),
+        }
 
     # -- head-to-head comparison, with uncertainty (M009/S05) --------------------
 

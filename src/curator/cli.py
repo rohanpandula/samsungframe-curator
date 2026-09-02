@@ -122,6 +122,7 @@ import dataclasses
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 from collections.abc import Callable, Sequence
@@ -198,6 +199,7 @@ from curator.taste.embedding.grouping import (
     MAX_CANDIDATE_POOL,
     GroupSelection,
     resolve_group_pool,
+    resolve_group_sources,
     select_group,
 )
 from curator.taste.embedding.head import (
@@ -1161,8 +1163,13 @@ def _entry_sha256(catalog: Catalog, entry_id: int) -> str:
     return str(row[0])
 
 
-def _format_group(selection: GroupSelection) -> str:
-    """Render a :class:`GroupSelection` as a human-readable block."""
+def _format_group(selection: GroupSelection, sources: list[str] | None = None) -> str:
+    """Render a :class:`GroupSelection` as a human-readable block.
+
+    *sources* (from :func:`~curator.taste.embedding.grouping.resolve_group_sources`)
+    adds the paste-ready ``curator propose`` line that hands the group to the
+    layout side.
+    """
     evidence = selection.evidence
     if not selection.available:
         return "\n".join(
@@ -1185,15 +1192,19 @@ def _format_group(selection: GroupSelection) -> str:
         f"  affinity {evidence['affinity_source']}, threshold {evidence['threshold']:.2f},"
         f" pool {evidence['pool_size']}, considered {evidence['considered']}"
     )
+    if sources:
+        lines.append(f"  propose  {shlex.join(['curator', 'propose', *sources])}")
     return "\n".join(lines)
 
 
 def _group(args: argparse.Namespace) -> int:
     """Propose a group of cataloged assets that belong together (M010/S04, R045).
 
-    Answers *which* images to hand ``curator propose``, never how they are
-    arranged — the geometry is :mod:`curator.artdirection`'s and never reads a
-    taste signal. The seed resolves through the existing :func:`_resolve_asset`
+    Answers *which* images to hand ``curator propose`` — and prints the
+    ``curator propose`` line that hands them over
+    (:func:`~curator.taste.embedding.grouping.resolve_group_sources`) —
+    never how they are arranged: the geometry is :mod:`curator.artdirection`'s
+    and never reads a taste signal. The seed resolves through the existing :func:`_resolve_asset`
     path; :func:`~curator.taste.embedding.grouping.resolve_group_pool` bounds the
     candidate pool from the catalog *before* any similarity math; and
     :func:`~curator.taste.embedding.grouping.select_group` does the rest.
@@ -1246,12 +1257,13 @@ def _group(args: argparse.Namespace) -> int:
             group_size=args.size,
             threshold=args.threshold,
         )
+        sources = resolve_group_sources(catalog, entry_id, selection)
     finally:
         catalog.db.close()
     if args.json:
-        print(json.dumps(selection.to_dict(), indent=2, ensure_ascii=False))
+        print(json.dumps({**selection.to_dict(), "sources": sources}, indent=2, ensure_ascii=False))
     else:
-        print(_format_group(selection))
+        print(_format_group(selection, sources))
     return EXIT_OK if selection.available else EXIT_NO_CHANGE
 
 

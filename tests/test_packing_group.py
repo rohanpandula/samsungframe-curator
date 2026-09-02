@@ -22,6 +22,7 @@ import ast
 import io
 import json
 import math
+import shlex
 from pathlib import Path
 
 import numpy as np
@@ -728,6 +729,25 @@ def test_cli_group_returns_a_group_and_exits_zero(data_root, tmp_path, catalog, 
     assert payload["evidence"]["affinity_source"] == "embedding_cosine"
     # The rejected candidate is still reported — what was passed over is visible.
     assert weak_sha in payload["evidence"]["pairwise_cosine"]
+
+
+def test_cli_group_prints_the_propose_bridge(data_root, tmp_path, catalog, monkeypatch):
+    """The group answers in shas; ``sources`` answers in the paths ``propose`` takes.
+
+    M010 milestone audit: ``curator group`` and ``curator propose`` spoke
+    different identities (sha vs path) with no bridge between them.
+    """
+    _use_fixture_model(monkeypatch)
+    seed_path, _seed_sha, _close_sha, _weak = _seeded_surface(catalog, tmp_path)
+    close_path = str((tmp_path / "frames" / "close.png").resolve())
+
+    rc, out = run_cli(["group", seed_path, "--size", "3", "--json"])
+    assert rc == EXIT_OK
+    assert json.loads(out)["sources"] == [seed_path, close_path]
+
+    rc, out = run_cli(["group", seed_path, "--size", "3"])
+    assert rc == EXIT_OK
+    assert shlex.join(["curator", "propose", seed_path, close_path]) in out
 
 
 def test_cli_group_human_output_names_the_members(data_root, tmp_path, catalog, monkeypatch):

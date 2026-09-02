@@ -6,8 +6,9 @@ images arranged". The geometry question belongs to
 never will: grouping lives here beside
 :mod:`curator.taste.embedding.attribution` precisely so the policy engine stays
 pure and the locked "treatment-level taste is out of scope" boundary holds. The
-only thing that crosses is a list of content shas, chosen here and handed to
-``curator propose``.
+only thing that crosses is a list of sources, chosen here and handed to
+``curator propose`` — :func:`resolve_group_sources` turns the chosen shas back
+into the asset paths ``propose`` takes, so both surfaces print the hand-off.
 
 Three properties this module is built around:
 
@@ -432,3 +433,37 @@ def resolve_group_pool(
     ).fetchall()
     pool = [str(sha) for sha, _ in rows]
     return pool, {str(sha): int(entry_id) for sha, entry_id in rows}
+
+
+def resolve_group_sources(
+    catalog: Catalog, seed_entry_id: int | None, selection: GroupSelection
+) -> list[str]:
+    """Return the ``curator propose`` argument list for *selection* (M010 audit).
+
+    :func:`select_group` answers in content shas and entry ids — the identity
+    the embedding store speaks — while ``curator propose`` takes cataloged asset
+    paths, and nothing bridged the two (the M010 milestone audit's one PARTIAL
+    wiring). Seed first, then members in ranked order, each resolved to the
+    ``asset_id`` ingest recorded: the resolved file path for a local folder, the
+    connector's own id otherwise — in which case ``propose`` says so loudly
+    rather than this function guessing. A seed with no catalog entry (the API's
+    bytes-only seed, WR-03) has no path to propose and is left out; the members
+    still resolve. This is the module's second and last database access, and it
+    is shared by both surfaces so ``curator group --json`` and
+    ``POST /api/packing/group`` stay byte-identical.
+    """
+    ordered = [member.entry_id for member in selection.members]
+    if seed_entry_id is not None and seed_entry_id >= 0:
+        ordered = [seed_entry_id, *ordered]
+    if not ordered:
+        return []
+    placeholders = ",".join("?" * len(ordered))
+    rows = catalog.db.execute(
+        f"SELECT id, asset_id FROM catalog_entries WHERE id IN ({placeholders})",
+        ordered,
+    ).fetchall()
+    by_id = {int(row[0]): str(row[1]) for row in rows}
+    missing = [entry_id for entry_id in ordered if entry_id not in by_id]
+    if missing:
+        raise CuratorError(f"group catalog entry {missing[0]} vanished during the query")
+    return [by_id[entry_id] for entry_id in ordered]
