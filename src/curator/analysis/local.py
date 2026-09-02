@@ -41,6 +41,7 @@ from typing import Any, cast
 import imagehash
 import numpy as np
 from PIL import Image, ImageFilter, ImageOps
+from scipy import ndimage
 
 from curator.analysis.compute import ComputeBackend
 from curator.analysis.errors import AnalysisError
@@ -386,7 +387,11 @@ class LocalAnalysisProvider(AnalysisProvider):
         gy, gx = LocalAnalysisProvider._gradients(img)
         mag = np.sqrt(gx * gx + gy * gy)
         mag_norm = mag / (mag.max() + 1e-9)
-        y, x = np.mgrid[0 : img.height, 0 : img.width]
+        # Broadcast two 1-D ranges instead of materializing np.mgrid's two full
+        # int64 grids (M011/S01): elementwise-identical values, a fraction of the
+        # memory on a 24-megapixel frame.
+        y = np.arange(img.height, dtype=np.int64)[:, None]
+        x = np.arange(img.width, dtype=np.int64)[None, :]
         cy, cx = img.height / 2.0, img.width / 2.0
         center = np.exp(
             -(((x - cx) / (0.6 * img.width)) ** 2 + ((y - cy) / (0.6 * img.height)) ** 2)
@@ -714,10 +719,8 @@ class LocalAnalysisProvider(AnalysisProvider):
         labelled = _connected_components(skin)
         if labelled is None:
             return False
-        for label in range(1, int(labelled.max()) + 1):
-            if int((labelled == label).sum()) >= 0.002 * img.width * img.height:
-                return True
-        return False
+        counts = np.bincount(labelled.ravel())[1:]
+        return bool(counts.size) and bool(counts.max() >= 0.002 * img.width * img.height)
 
     # -- metadata ------------------------------------------------------------
 
@@ -824,45 +827,33 @@ def _subjects_from_mask(mask: np.ndarray, img: _ImageData) -> list[BoundingBox]:
     labelled = _connected_components(mask)
     if labelled is None:
         return []
+    counts = np.bincount(labelled.ravel())
     boxes: list[BoundingBox] = []
-    for label in range(1, int(labelled.max()) + 1):
-        ys, xs = np.nonzero(labelled == label)
-        if ys.size == 0:
+    for label, extent in enumerate(ndimage.find_objects(labelled), start=1):
+        if extent is None:
             continue
-        area = ys.size / float(mask.size)
+        area = counts[label] / float(mask.size)
         if area < _MIN_SUBJECT_AREA:
             continue
-        x0, x1 = float(xs.min()) / img.width, (float(xs.max()) + 1) / img.width
-        y0, y1 = float(ys.min()) / img.height, (float(ys.max()) + 1) / img.height
+        ys, xs = extent
+        x0, x1 = float(xs.start) / img.width, float(xs.stop) / img.width
+        y0, y1 = float(ys.start) / img.height, float(ys.stop) / img.height
         boxes.append(BoundingBox(x=x0, y=y0, w=x1 - x0, h=y1 - y0))
     boxes.sort(key=lambda b: (b.w * b.h, b.x, b.y), reverse=True)
     return boxes
 
 
 def _connected_components(mask: np.ndarray) -> np.ndarray | None:
-    """4-connected component labelling of *mask*; None when no foreground pixels."""
-    mask = mask.astype(bool)
+    """4-connected component labelling of *mask*; None when no foreground pixels.
+
+    ``scipy.ndimage.label`` (C, cross-shaped structure == 4-connectivity) numbers
+    components in raster order of their first pixel — exactly what the pure-Python
+    flood fill it replaced did (M011/S01), which took minutes on a 24-megapixel
+    photo; its callers only ever read the component count, per-component pixel
+    counts and bounding extents, none of which depend on numbering anyway.
+    """
+    mask = np.asarray(mask, dtype=bool)
     if not mask.any():
         return None
-    labelled = np.zeros(mask.shape, dtype=np.int64)
-    h, w = mask.shape
-    label = 0
-    for y in range(h):
-        for x in range(w):
-            if not mask[y, x] or labelled[y, x]:
-                continue
-            label += 1
-            stack = [(y, x)]
-            labelled[y, x] = label
-            while stack:
-                cy, cx = stack.pop()
-                for yn, xn in (
-                    (cy - 1, cx),
-                    (cy + 1, cx),
-                    (cy, cx - 1),
-                    (cy, cx + 1),
-                ):
-                    if 0 <= yn < h and 0 <= xn < w and mask[yn, xn] and not labelled[yn, xn]:
-                        labelled[yn, xn] = label
-                        stack.append((yn, xn))
+    labelled, _count = ndimage.label(mask)
     return labelled

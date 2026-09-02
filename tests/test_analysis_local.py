@@ -149,3 +149,70 @@ def test_pairing_scores_between_analyzed_assets() -> None:
     assert pairing.palette_distance is not None
     assert pairing.orientation_match is True
     assert pairing.affinity < 1.0
+
+
+# -- M011/S01: C-speed component labelling, identical output -------------------
+
+
+def _reference_flood_fill(mask):
+    """The pure-Python 4-connected flood fill M011/S01 replaced, kept as the oracle."""
+    mask = mask.astype(bool)
+    if not mask.any():
+        return None
+    labelled = np.zeros(mask.shape, dtype=np.int64)
+    h, w = mask.shape
+    label = 0
+    for y in range(h):
+        for x in range(w):
+            if not mask[y, x] or labelled[y, x]:
+                continue
+            label += 1
+            stack = [(y, x)]
+            labelled[y, x] = label
+            while stack:
+                cy, cx = stack.pop()
+                for yn, xn in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                    if 0 <= yn < h and 0 <= xn < w and mask[yn, xn] and not labelled[yn, xn]:
+                        labelled[yn, xn] = label
+                        stack.append((yn, xn))
+    return labelled
+
+
+@pytest.mark.parametrize("density", [0.0, 0.2, 0.5, 0.8, 1.0])
+def test_connected_components_match_the_reference_flood_fill(density: float) -> None:
+    """Same partition *and* the same raster-order numbering as the flood fill.
+
+    Callers read only counts, per-component areas and extents, but pinning the
+    numbering too keeps every persisted ``analysis_json`` byte-identical across
+    the M011/S01 swap to ``scipy.ndimage.label``.
+    """
+    from curator.analysis.local import _connected_components
+
+    rng = np.random.default_rng(int(density * 100))
+    mask = rng.random((48, 64)) < density
+    expected = _reference_flood_fill(mask)
+    actual = _connected_components(mask)
+    if expected is None:
+        assert actual is None
+    else:
+        assert actual is not None
+        assert np.array_equal(expected, actual)
+
+
+def test_textured_image_analyzes_in_seconds_not_minutes() -> None:
+    """A 9,000-region noise frame took 67s before M011/S01 (per-label full scans).
+
+    Generous bound on purpose: this guards the complexity class, not a machine.
+    """
+    import time
+
+    from curator.analysis.local import LocalAnalysisProvider
+    from curator.analysis.profiles import AnalysisProfile
+
+    rng = np.random.default_rng(1)
+    frame = Image.fromarray(rng.integers(0, 255, (600, 800, 3), dtype=np.uint8))
+    buf = io.BytesIO()
+    frame.save(buf, format="PNG")
+    started = time.perf_counter()
+    LocalAnalysisProvider().analyze(buf.getvalue(), AnalysisProfile.BALANCED, asset_id="noise")
+    assert time.perf_counter() - started < 15.0
