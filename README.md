@@ -31,11 +31,20 @@ turn that on yourself.
   image. Nothing is ever upscaled or cropped without you knowing.
 - **Approve before it's used.** Approve, reject, undo, and batch-review photos.
   Full history is kept, so you can always see what you decided and why.
-- **A simple web app.** Use the whole thing in your browser: browse, analyze,
-  preview, and approve. Works with a keyboard and screen readers.
-- **Publishes to your Frame.** Filesystem, a simulator, Samsung Art Mode, and
-  Home Assistant are all supported. Updates are safe: it tests before sending,
-  replaces by exact ID, and can roll back if something goes wrong.
+- **One page, one flow.** The web app is three steps on a single screen:
+  **Load** a folder, **Score and pick** (your photos as thumbnails, best first,
+  tap ✓ or ✕), **Hang** every approved photo on the Frame. Each step shows a
+  live count; long work runs in the background with a progress bar. Works with
+  a keyboard and screen readers. The engineer's tools (analysis numbers,
+  proposals, manual renders, validation) are one click away under "More tools".
+- **Publishes to your Frame.** "Hang" renders every approved photo at 1080p or
+  4K and publishes it: today to a folder (copy it to a USB stick and the Frame
+  shows it) or to a built-in simulator. Updates are safe: it verifies before
+  replacing, replaces by exact ID, journals every step, and never crops or
+  upscales silently — a photo that cannot be shown honestly is skipped and
+  named. The Samsung Art Mode adapter and Home Assistant lease are built and
+  tested against simulators; a network transport to a real TV is not written
+  yet, and the page says so rather than pretending.
 - **Watches for new photos.** New files in your watched folders are picked up
   once, automatically.
 - **Playlists and rotation.** Collections rotate through your approved shots —
@@ -102,7 +111,10 @@ curator headless start               # run the server
 ```
 
 The web app runs at `127.0.0.1:8765` (the FastAPI app, also importable as
-`curator.api`).
+`curator.api`). Its page talks to `GET /api/wall` (everything on screen in one
+call), `GET /api/thumb/{sha}` (cached thumbnails), and three background jobs:
+`POST /api/load`, `POST /api/score`, `POST /api/publish` (poll the same paths
+with `GET`; pass `"wait": true` to run inline).
 
 ## Configuration
 

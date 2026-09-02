@@ -22,7 +22,7 @@ test:
 # and a reachability check strictly stronger than M009's — satisfiable only from
 # cli.py / webui/app.js, never from api.py).
 acceptance:
-	uv run pytest tests/test_acceptance.py tests/test_connector_contract.py tests/test_acceptance_analysis.py tests/test_acceptance_render.py tests/test_acceptance_webui.py tests/test_acceptance_adapters.py tests/test_acceptance_ops.py tests/test_acceptance_taste.py tests/test_acceptance_taste_dialogue.py tests/test_acceptance_taste_embedding.py tests/test_acceptance_packing.py -q
+	uv run pytest tests/test_acceptance.py tests/test_connector_contract.py tests/test_acceptance_analysis.py tests/test_acceptance_render.py tests/test_acceptance_webui.py tests/test_acceptance_adapters.py tests/test_acceptance_ops.py tests/test_acceptance_taste.py tests/test_acceptance_taste_dialogue.py tests/test_acceptance_taste_embedding.py tests/test_acceptance_packing.py tests/test_acceptance_wall.py -q
 
 lint:
 	uv run ruff check .
