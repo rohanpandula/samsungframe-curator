@@ -3,194 +3,237 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Darkroom Bench</title>
+  <title>Curator · Darkroom Bench</title>
   <link rel="stylesheet" href="/app/styles.css">
 </head>
 <body>
   <a class="skip-link" href="#main">Skip to main content</a>
-  <header>
+
+  <header class="top">
     <div class="brand">
-      <h1>Darkroom Bench</h1>
-      <p id="status" role="status" aria-live="polite" class="status-text">Loading catalog…</p>
-    </div>
-    <div class="target-select">
-      <label for="target">Output target</label>
-      <select id="target" name="target">
-        <option value="1080p">1080p (1920×1080)</option>
-        <option value="4k">4K (3840×2160)</option>
-      </select>
+      <h1>Curator</h1>
+      <p class="tagline">Your photos, curated for the Frame.</p>
+      <p id="status" role="status" aria-live="polite" class="status-text">Loading…</p>
     </div>
     <nav aria-label="Sections">
-      <a href="#catalog" id="nav-catalog" aria-current="page">Catalog</a>
-      <a href="#review" id="nav-review">Review</a>
-      <a href="#taste" id="nav-taste">Taste</a>
+      <a href="#catalog" id="nav-catalog" aria-current="page">Photos</a>
+      <a href="#review-view" id="nav-review">Picks</a>
+      <a href="#taste-view" id="nav-taste">Taste</a>
     </nav>
+    <ol class="counts" aria-label="Progress">
+      <li><strong id="count-loaded">–</strong><span>loaded</span></li>
+      <li><strong id="count-scored">–</strong><span>scored</span></li>
+      <li><strong id="count-approved">–</strong><span>approved</span></li>
+      <li><strong id="count-hung">–</strong><span>on the Frame</span></li>
+    </ol>
   </header>
 
   <main id="main">
-    <div id="catalog-view" class="catalog-view">
-    <section id="catalog" aria-label="Catalog" class="catalog">
-      <h2>Catalog</h2>
-      <div id="catalog-grid" class="catalog-grid"></div>
+
+    <!-- 1 · Load -->
+    <section class="stage" id="stage-load" aria-labelledby="load-heading">
+      <h2 id="load-heading"><span class="step">1</span> Load photos</h2>
+      <p class="hint">Point it at a folder on this Mac or an attached drive. Originals are never changed.
+        <span id="load-folders" class="folders"></span></p>
+      <form id="load-form" class="row">
+        <label for="load-path" class="visually-hidden">Folder to load</label>
+        <input id="load-path" name="load-path" type="text" inputmode="text" spellcheck="false"
+               placeholder="/Volumes/SSD/Photos" autocomplete="off">
+        <button type="submit" id="load-button" class="btn primary">Load photos</button>
+      </form>
+      <progress id="load-progress" class="bar" hidden></progress>
+      <p id="load-status" class="status-text muted" role="status" aria-live="polite"></p>
     </section>
 
-    <aside id="details" class="details" aria-label="Entry details" aria-live="polite">
-      <h2>Details</h2>
-      <div id="empty-details" class="empty">
-        <p>Select a catalog entry to inspect it.</p>
-      </div>
-
-      <div id="detail-body" hidden>
-        <header class="detail-header">
-          <h3 id="detail-title">—</h3>
-          <span id="detail-decision" class="decision pending">pending</span>
-        </header>
-        <dl class="meta" id="detail-meta"></dl>
-
-        <section class="panel" aria-labelledby="analysis-heading">
-          <h3 id="analysis-heading">Analysis</h3>
-          <p id="analysis-summary" class="muted">Not analyzed yet.</p>
-          <div id="analysis-body"></div>
-        </section>
-
-        <section class="panel" aria-labelledby="proposals-heading">
-          <h3 id="proposals-heading">Proposals</h3>
-          <p id="proposals-summary" class="muted">No proposals yet.</p>
-          <ol id="proposals-list"></ol>
-        </section>
-
-        <section class="panel" aria-labelledby="render-heading">
-          <h3 id="render-heading">Render</h3>
-          <p id="render-summary" class="muted">Nothing rendered.</p>
-          <div id="render-body"></div>
-        </section>
-
-        <section class="panel" aria-labelledby="validate-heading">
-          <h3 id="validate-heading">Validation</h3>
-          <p id="validate-summary" class="muted">Nothing validated.</p>
-          <div id="validate-body"></div>
-        </section>
-
-        <section class="panel actions" aria-label="Actions">
-          <h3>Actions</h3>
-          <div class="action-row">
-            <label for="profile">Profile</label>
-            <select id="profile" name="profile">
-              <option value="balanced">balanced</option>
-              <option value="quality">quality</option>
-              <option value="aesthetic">aesthetic</option>
-            </select>
-          </div>
-          <div class="action-row action-buttons">
-            <button type="button" id="analyze" class="btn primary">Analyze</button>
-            <button type="button" id="propose" class="btn primary">Propose</button>
-            <button type="button" id="render-1080p" class="btn">Render 1080p</button>
-            <button type="button" id="render-4k" class="btn">Render 4K</button>
-            <button type="button" id="validate" class="btn" disabled>Validate</button>
-            <button type="button" id="approve" class="btn approve">Approve</button>
-            <button type="button" id="reject" class="btn reject">Reject</button>
-            <button type="button" id="undo" class="btn">Undo</button>
-          </div>
-        </section>
-      </div>
-    </aside>
-    </div>
-
-    <section id="review-view" class="review" aria-label="Review queue" data-review-mode="queue" hidden>
-      <h2>Review</h2>
-      <div class="review-toolbar">
+    <!-- 2 · Score and pick -->
+    <section class="stage" id="catalog" aria-label="Catalog">
+      <h2 id="pick-heading"><span class="step">2</span> Score and pick</h2>
+      <p class="hint">Scoring happens on this machine, offline. Best first once scored. Tap ✓ to approve a photo for the Frame, ✕ to reject it.</p>
+      <div class="row toolbar">
+        <button type="button" id="score-button" class="btn primary">Score all photos</button>
+        <progress id="score-progress" class="bar" max="1" value="0" hidden></progress>
+        <span id="score-status" class="status-text muted" role="status" aria-live="polite"></span>
         <div class="filter-group" role="group" aria-label="Filter review queue by decision">
           <button type="button" class="filter-btn" id="filter-pending" aria-pressed="true">Pending</button>
           <button type="button" class="filter-btn" id="filter-approved" aria-pressed="false">Approved</button>
           <button type="button" class="filter-btn" id="filter-rejected" aria-pressed="false">Rejected</button>
           <button type="button" class="filter-btn" id="filter-all" aria-pressed="false">All</button>
         </div>
-        <p id="review-status" class="status-text muted" role="status" aria-live="polite"></p>
       </div>
+      <div id="catalog-grid" class="catalog-grid" aria-live="polite"></div>
+    </section>
+
+    <!-- 3 · Hang -->
+    <section class="stage" id="stage-hang" aria-labelledby="hang-heading">
+      <h2 id="hang-heading"><span class="step">3</span> Hang on the Frame</h2>
+      <p class="hint">Every approved photo is rendered at the size below and sent to the destination you choose.
+        Nothing is ever cropped or upscaled silently: a photo that cannot be shown honestly is skipped and named.
+        <span id="hang-summary"></span></p>
+      <div class="row">
+        <label for="target">Size</label>
+        <select id="target" name="target">
+          <option value="1080p">1080p (1920×1080)</option>
+          <option value="4k">4K (3840×2160)</option>
+        </select>
+        <label for="destination">Where</label>
+        <select id="destination" name="destination"></select>
+        <input id="destination-folder" name="destination-folder" type="text" spellcheck="false"
+               placeholder="folder (default: ~/.curator/wall)" aria-label="Destination folder">
+        <button type="button" id="hang-button" class="btn primary big">Hang approved photos</button>
+      </div>
+      <p id="destination-note" class="status-text muted"></p>
+      <progress id="hang-progress" class="bar" max="1" value="0" hidden></progress>
+      <p id="hang-status" class="status-text muted" role="status" aria-live="polite"></p>
+      <ul id="hang-results" class="hang-results"></ul>
+    </section>
+
+    <!-- Your picks (the review queue, now a strip of kept photos) -->
+    <section id="review-view" class="stage picks" aria-label="Review queue" data-review-mode="queue">
+      <h2>Approved for the Frame</h2>
+      <p id="review-status" class="status-text muted" role="status" aria-live="polite"></p>
       <ul id="review-list" class="review-list"></ul>
     </section>
 
-    <div id="taste-view" class="taste" hidden>
-      <section id="reaction-room" class="panel" aria-labelledby="reaction-room-heading">
-        <h2 id="reaction-room-heading">Reaction Room</h2>
-        <p class="muted">
-          Drop any images — your own or someone else's — and say what you think in
-          your own words. Third-party images are kept as a thumbnail and a hash
-          only, unless you choose to save them.
-        </p>
-        <div class="action-row">
-          <label for="taste-files">Images</label>
-          <input type="file" id="taste-files" name="taste-files" accept="image/*" multiple>
-        </div>
-        <div class="action-row">
-          <label for="taste-note">Your reaction</label>
-          <textarea id="taste-note" name="taste-note" rows="3"
-            placeholder="What do you notice? Say it however you'd say it out loud."></textarea>
-        </div>
-        <div class="action-row">
-          <label for="taste-save">
-            <input type="checkbox" id="taste-save" name="taste-save">
-            Also save these images to the catalog at full resolution
-          </label>
-        </div>
-        <div class="action-row action-buttons">
-          <button type="button" id="taste-submit" class="btn primary">React</button>
-        </div>
-        <p id="taste-room-status" class="status-text muted" role="status" aria-live="polite"></p>
-        <div id="taste-turn" hidden>
-          <p id="taste-question" class="taste-question"></p>
-          <div id="taste-learned" class="taste-learned" aria-live="polite">
-            <h3>What I learned</h3>
-            <pre id="taste-learned-body"></pre>
-          </div>
-        </div>
-      </section>
-
-      <section id="taste-profile" class="panel" aria-labelledby="taste-profile-heading">
-        <h2 id="taste-profile-heading">Taste Profile</h2>
-        <p id="taste-profile-status" class="status-text muted" role="status" aria-live="polite"></p>
-
-        <section aria-labelledby="taste-vocabulary-heading">
-          <h3 id="taste-vocabulary-heading">Vocabulary</h3>
-          <ul id="taste-vocabulary" class="taste-vocabulary"></ul>
-        </section>
-
-        <section aria-labelledby="taste-patterns-heading">
-          <h3 id="taste-patterns-heading">Patterns</h3>
-          <ul id="taste-patterns" class="taste-claims"></ul>
-        </section>
-
-        <section aria-labelledby="taste-tensions-heading">
-          <h3 id="taste-tensions-heading">Tensions</h3>
-          <ul id="taste-tensions" class="taste-claims"></ul>
-        </section>
-
-        <section aria-labelledby="taste-evolution-heading">
-          <h3 id="taste-evolution-heading">Evolution</h3>
-          <ol id="taste-evolution" class="taste-evolution"></ol>
-        </section>
-      </section>
-
+    <!-- Taste: the deck first, the dialogue tools folded away -->
+    <aside id="taste-view" class="stage taste" aria-label="Taste">
       <section id="taste-deck" class="panel" aria-labelledby="taste-deck-heading">
-        <h2 id="taste-deck-heading">Taste Deck</h2>
-        <p id="taste-deck-empty" class="empty">
-          Not enough analyzed images yet to compare — analyze at least two.
-        </p>
+        <h2 id="taste-deck-heading">Which do you prefer?</h2>
+        <p class="hint">Each pick teaches it your eye. Two analyzed photos are enough to start.</p>
+        <p id="taste-deck-empty" class="empty">Score at least two photos to start comparing.</p>
         <div id="taste-deck-body" hidden>
-          <p class="muted">Which do you prefer?</p>
           <div class="taste-pair">
-            <div class="pair-candidate" id="taste-deck-a">—</div>
-            <div class="pair-candidate" id="taste-deck-b">—</div>
+            <button type="button" class="pair-candidate" id="taste-deck-a" aria-label="Prefer A"></button>
+            <button type="button" class="pair-candidate" id="taste-deck-b" aria-label="Prefer B"></button>
           </div>
           <div class="pair-buttons">
-            <button type="button" id="taste-prefer-a" class="btn primary">Prefer A</button>
-            <button type="button" id="taste-prefer-b" class="btn primary">Prefer B</button>
+            <button type="button" id="taste-prefer-a" class="btn">Prefer A</button>
+            <button type="button" id="taste-prefer-b" class="btn">Prefer B</button>
           </div>
         </div>
         <p id="taste-deck-status" class="status-text muted" role="status" aria-live="polite"></p>
       </section>
-    </div>
+
+      <details class="more" id="taste-more">
+        <summary>Teach it in your own words</summary>
+
+        <section id="reaction-room" class="panel" aria-labelledby="reaction-room-heading">
+          <h2 id="reaction-room-heading">Reaction Room</h2>
+          <p class="muted">
+            Drop any images — your own or someone else's — and say what you think in
+            your own words. Third-party images are kept as a thumbnail and a hash
+            only, unless you choose to save them.
+          </p>
+          <div class="action-row">
+            <label for="taste-files">Images</label>
+            <input type="file" id="taste-files" name="taste-files" accept="image/*" multiple>
+          </div>
+          <div class="action-row">
+            <label for="taste-note">Your reaction</label>
+            <textarea id="taste-note" name="taste-note" rows="3"
+              placeholder="What do you notice? Say it however you'd say it out loud."></textarea>
+          </div>
+          <div class="action-row">
+            <label for="taste-save">
+              <input type="checkbox" id="taste-save" name="taste-save">
+              Also save these images to the catalog at full resolution
+            </label>
+          </div>
+          <div class="action-row action-buttons">
+            <button type="button" id="taste-submit" class="btn primary">React</button>
+          </div>
+          <p id="taste-room-status" class="status-text muted" role="status" aria-live="polite"></p>
+          <div id="taste-turn" hidden>
+            <p id="taste-question" class="taste-question"></p>
+            <div id="taste-learned" class="taste-learned" aria-live="polite">
+              <h3>What I learned</h3>
+              <pre id="taste-learned-body"></pre>
+            </div>
+          </div>
+        </section>
+
+        <section id="taste-profile" class="panel" aria-labelledby="taste-profile-heading">
+          <h2 id="taste-profile-heading">Taste Profile</h2>
+          <p id="taste-profile-status" class="status-text muted" role="status" aria-live="polite"></p>
+          <section aria-labelledby="taste-vocabulary-heading">
+            <h3 id="taste-vocabulary-heading">Vocabulary</h3>
+            <ul id="taste-vocabulary" class="taste-vocabulary"></ul>
+          </section>
+          <section aria-labelledby="taste-patterns-heading">
+            <h3 id="taste-patterns-heading">Patterns</h3>
+            <ul id="taste-patterns" class="taste-claims"></ul>
+          </section>
+          <section aria-labelledby="taste-tensions-heading">
+            <h3 id="taste-tensions-heading">Tensions</h3>
+            <ul id="taste-tensions" class="taste-claims"></ul>
+          </section>
+          <section aria-labelledby="taste-evolution-heading">
+            <h3 id="taste-evolution-heading">Evolution</h3>
+            <ol id="taste-evolution" class="taste-evolution"></ol>
+          </section>
+        </section>
+      </details>
+    </aside>
   </main>
+
+  <!-- Photo drawer: one photo, its picture, its score, keep / pass / undo, and the tools underneath -->
+  <aside id="details" class="drawer" aria-label="Entry details" aria-live="polite" hidden>
+    <div class="drawer-head">
+      <button type="button" id="detail-close" class="btn ghost" aria-label="Close details">✕</button>
+      <h2 id="detail-title">—</h2>
+      <span id="detail-decision" class="decision pending">pending</span>
+    </div>
+    <div id="empty-details" class="empty" hidden><p>Select a photo to inspect it.</p></div>
+    <div id="detail-body">
+      <img id="detail-image" class="detail-image" alt="" hidden>
+      <p id="detail-score" class="detail-score muted"></p>
+      <p id="detail-layout" class="detail-layout muted"></p>
+      <div class="action-row action-buttons big-actions">
+        <button type="button" id="approve" class="btn approve big">✓ Approve</button>
+        <button type="button" id="reject" class="btn reject big">✕ Reject</button>
+        <button type="button" id="undo" class="btn">Undo</button>
+      </div>
+
+      <details class="more" id="more-tools">
+        <summary>More tools</summary>
+        <dl class="meta" id="detail-meta"></dl>
+        <div class="action-row">
+          <label for="profile">Profile</label>
+          <select id="profile" name="profile">
+            <option value="balanced">balanced</option>
+            <option value="quality">quality</option>
+            <option value="aesthetic">aesthetic</option>
+          </select>
+        </div>
+        <div class="action-row action-buttons">
+          <button type="button" id="analyze" class="btn">Analyze</button>
+          <button type="button" id="propose" class="btn">Propose</button>
+          <button type="button" id="render-1080p" class="btn">Render 1080p</button>
+          <button type="button" id="render-4k" class="btn">Render 4K</button>
+          <button type="button" id="validate" class="btn" disabled>Validate</button>
+        </div>
+        <section class="panel" aria-labelledby="analysis-heading">
+          <h3 id="analysis-heading">Analysis</h3>
+          <p id="analysis-summary" class="muted">Not analyzed yet.</p>
+          <div id="analysis-body"></div>
+        </section>
+        <section class="panel" aria-labelledby="proposals-heading">
+          <h3 id="proposals-heading">Proposals</h3>
+          <p id="proposals-summary" class="muted">No proposals yet.</p>
+          <ol id="proposals-list"></ol>
+        </section>
+        <section class="panel" aria-labelledby="render-heading">
+          <h3 id="render-heading">Render</h3>
+          <p id="render-summary" class="muted">Nothing rendered.</p>
+          <div id="render-body"></div>
+        </section>
+        <section class="panel" aria-labelledby="validate-heading">
+          <h3 id="validate-heading">Validation</h3>
+          <p id="validate-summary" class="muted">Nothing validated.</p>
+          <div id="validate-body"></div>
+        </section>
+      </details>
+    </div>
+  </aside>
 
   <div id="message" class="toast" role="alert" aria-live="assertive"></div>
   <script src="/app/app.js"></script>

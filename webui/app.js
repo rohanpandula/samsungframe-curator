@@ -1,14 +1,17 @@
 (function () {
   "use strict";
 
+  // One Wall (M011/S02): one page, one flow — Load → Score and pick → Hang.
+  // GET /api/wall is the single source of truth for the page; every action
+  // that changes state ends by calling refresh().
+
   var state = {
-    entries: [],
-    decisions: {},
-    selected: null,
-    lastRender: null,
-    reviewEntries: [],
-    reviewFilter: "pending",
+    wall: null,          // last GET /api/wall payload
+    filter: "pending",   // grid filter: pending | approved | rejected | all
+    selected: null,      // the entry open in the drawer
+    lastRender: null,    // {sha, target, size} for the Validate tool
     tasteProfile: null,
+    watching: {},        // job name -> interval id
   };
 
   // The pair the Taste Deck last fetched via GET /api/taste/pair — echoed back
@@ -52,6 +55,14 @@
     return resp.json();
   }
 
+  function post(url, body) {
+    return fetchJSON(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: body,
+    });
+  }
+
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
@@ -59,87 +70,270 @@
     return node;
   }
 
-  // -- catalog grid ----------------------------------------------------------
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many);
+  }
 
-  function renderCards() {
-    var grid = $("catalog-grid");
-    if (!state.entries.length) {
-      var empty = el("p", "empty", "No catalog entries.");
-      grid.replaceChildren(empty);
+  function decisionWord(decision) {
+    return decision === "approved" ? "approved" : decision === "rejected" ? "rejected" : "pending";
+  }
+
+  function thumbUrl(entry, w) {
+    return entry.thumb + "?w=" + (w || 320);
+  }
+
+  function scoreText(entry) {
+    if (!entry.scored || entry.score === null) return "not scored yet";
+    return "score " + Number(entry.score).toFixed(2);
+  }
+
+  // -- the wall --------------------------------------------------------------
+
+  async function refresh() {
+    try {
+      state.wall = await fetchJSON("/api/wall");
+    } catch (err) {
+      setStatus("Could not load your photos.", true);
+      showToast(err.message, true);
       return;
     }
-    var cards = state.entries.map(function (entry) {
-      var decision = state.decisions[entry.asset_id] || "pending";
-      var card = el("button", "card");
-      card.type = "button";
-      card.setAttribute("tabindex", "0");
-      card.setAttribute(
-        "aria-pressed",
-        state.selected && state.selected.asset_id === entry.asset_id ? "true" : "false"
-      );
-
-      var name = el("span", "card-name", entry.asset_id);
-      var decisionBadge = el("span", "decision " + decision, decision);
-      var sha = el("span", "card-sub", "sha " + (entry.sha256 || "").slice(0, 10) + "…");
-      var score = el(
-        "span",
-        "card-score",
-        entry.quality_score != null ? "quality " + Number(entry.quality_score).toFixed(2) : ""
-      );
-
-      card.append(decisionBadge, name, sha);
-      if (score.textContent) card.append(score);
-
-      card.addEventListener("click", function () {
-        select(entry);
-      });
-      card.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          select(entry);
-        }
-      });
-      if (state.selected && state.selected.asset_id === entry.asset_id) {
-        card.classList.add("selected");
-      }
-      return card;
-    });
-    grid.replaceChildren.apply(grid, cards);
+    renderAll();
   }
+
+  function renderAll() {
+    var wall = state.wall;
+    renderCounts(wall.counts);
+    renderFolders(wall.folders);
+    renderGrid();
+    renderPicks();
+    renderDestinations(wall.destinations);
+    renderHangSummary(wall.counts);
+    resumeJobs(wall.jobs);
+    if (state.selected) {
+      var fresh = findEntry(state.selected.entry_id);
+      if (fresh) {
+        state.selected = fresh;
+        renderDrawer(fresh, false);
+      }
+    }
+    var c = wall.counts;
+    setStatus(
+      c.loaded === 0
+        ? "No photos yet — load a folder to begin."
+        : plural(c.loaded, "photo", "photos") + " · " + c.scored + " scored · " +
+          c.approved + " approved · " + c.hung + " on the Frame."
+    );
+  }
+
+  function findEntry(entryId) {
+    var entries = state.wall ? state.wall.entries : [];
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].entry_id === entryId) return entries[i];
+    }
+    return null;
+  }
+
+  function renderCounts(counts) {
+    $("count-loaded").textContent = counts.loaded;
+    $("count-scored").textContent = counts.scored;
+    $("count-approved").textContent = counts.approved;
+    $("count-hung").textContent = counts.hung;
+  }
+
+  function renderFolders(folders) {
+    var node = $("load-folders");
+    if (!folders.length) {
+      node.textContent = "Nothing loaded yet.";
+      return;
+    }
+    node.textContent = "Loaded so far: " + folders.join(", ");
+    if (!$("load-path").value) $("load-path").placeholder = folders[0];
+  }
+
+  // -- stage 2: the grid -----------------------------------------------------
+
+  function visibleEntries() {
+    var entries = state.wall ? state.wall.entries : [];
+    if (state.filter === "all") return entries;
+    return entries.filter(function (entry) {
+      return entry.decision === state.filter;
+    });
+  }
+
+  function renderGrid() {
+    var grid = $("catalog-grid");
+    var entries = visibleEntries();
+    if (!state.wall || !state.wall.entries.length) {
+      grid.replaceChildren(el("p", "empty", "No photos loaded yet."));
+      return;
+    }
+    if (!entries.length) {
+      grid.replaceChildren(el("p", "empty", "No " + decisionWord(state.filter) + " photos."));
+      return;
+    }
+    grid.replaceChildren.apply(grid, entries.map(card));
+  }
+
+  function card(entry) {
+    var article = el("article", "card " + entry.decision);
+    article.dataset.entry = entry.entry_id;
+
+    var open = el("button", "card-open");
+    open.type = "button";
+    open.setAttribute("aria-label", "Open " + entry.name);
+    open.setAttribute(
+      "aria-pressed",
+      state.selected && state.selected.entry_id === entry.entry_id ? "true" : "false"
+    );
+    var img = el("img");
+    img.src = thumbUrl(entry, 480);
+    img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    open.append(img);
+    open.append(el("span", "score-badge" + (entry.scored ? "" : " unscored"), scoreText(entry)));
+    if (entry.hung && entry.hung.length) {
+      open.append(el("span", "hung-badge", "on the Frame"));
+    }
+    open.addEventListener("click", function () {
+      select(entry);
+    });
+
+    var foot = el("div", "card-foot");
+    foot.append(el("span", "card-name", entry.name));
+    var actions = el("div", "card-actions");
+    actions.setAttribute("role", "group");
+    actions.setAttribute("aria-label", "Decide on " + entry.name);
+    var keep = el("button", "btn approve" + (entry.decision === "approved" ? " on" : ""), "✓");
+    keep.type = "button";
+    keep.setAttribute("aria-label", "Approve " + entry.name);
+    keep.setAttribute("aria-pressed", entry.decision === "approved" ? "true" : "false");
+    keep.addEventListener("click", function () {
+      decide(entry.decision === "approved" ? "undo" : "approve", entry);
+    });
+    var pass = el("button", "btn reject" + (entry.decision === "rejected" ? " on" : ""), "✕");
+    pass.type = "button";
+    pass.setAttribute("aria-label", "Reject " + entry.name);
+    pass.setAttribute("aria-pressed", entry.decision === "rejected" ? "true" : "false");
+    pass.addEventListener("click", function () {
+      decide(entry.decision === "rejected" ? "undo" : "reject", entry);
+    });
+    actions.append(keep, pass);
+    foot.append(actions);
+
+    article.append(open, foot);
+    return article;
+  }
+
+  function setFilter(filter) {
+    state.filter = filter;
+    ["pending", "approved", "rejected", "all"].forEach(function (key) {
+      var btn = $("filter-" + key);
+      if (btn) btn.setAttribute("aria-pressed", key === filter ? "true" : "false");
+    });
+    renderGrid();
+  }
+
+  // -- decisions -------------------------------------------------------------
+
+  async function decide(action, entry) {
+    try {
+      var data = await post(
+        "/api/review/" + action,
+        JSON.stringify({ asset: entry.asset_id, entry_id: entry.entry_id })
+      );
+      var word = decisionWord(data.decision || "pending");
+      showToast(entry.name + " — " + word + ".");
+      await refresh();
+    } catch (err) {
+      showToast(err.message, true);
+    }
+  }
+
+  // -- your picks --------------------------------------------------------------
+
+  function renderPicks() {
+    var list = $("review-list");
+    var kept = (state.wall ? state.wall.entries : []).filter(function (entry) {
+      return entry.decision === "approved";
+    });
+    $("review-status").textContent = kept.length
+      ? plural(kept.length, "photo", "photos") + " approved, in score order."
+      : "Nothing approved yet. Tap ✓ on a photo above.";
+    if (!kept.length) {
+      list.replaceChildren();
+      return;
+    }
+    list.replaceChildren.apply(
+      list,
+      kept.map(function (entry) {
+        var row = el("li", "review-row");
+        var open = el("button", "pick-open");
+        open.type = "button";
+        open.setAttribute("aria-label", "Open " + entry.name);
+        var img = el("img");
+        img.src = thumbUrl(entry, 240);
+        img.alt = "";
+        img.loading = "lazy";
+        open.append(img);
+        open.addEventListener("click", function () {
+          select(entry);
+        });
+        var name = el("span", "review-name", entry.name);
+        var undo = el("button", "btn small", "Undo");
+        undo.type = "button";
+        undo.setAttribute("aria-label", "Undo approving " + entry.name);
+        undo.addEventListener("click", function () {
+          decide("undo", entry);
+        });
+        row.append(open, name, undo);
+        return row;
+      })
+    );
+  }
+
+  // -- the drawer --------------------------------------------------------------
 
   function select(entry) {
     state.selected = entry;
     state.lastRender = null;
     $("validate").disabled = true;
-    renderCards();
-    renderDetails();
-    $("details").scrollIntoView({ behavior: "smooth", block: "start" });
+    renderDrawer(entry, true);
+    renderGrid();
   }
 
-  // -- details panel ---------------------------------------------------------
+  function closeDrawer() {
+    state.selected = null;
+    $("details").hidden = true;
+    renderGrid();
+  }
 
-  function renderDetails() {
-    var entry = state.selected;
-    $("empty-details").hidden = true;
-    $("detail-body").hidden = false;
-
-    var title = entry.asset_id;
-    if (entry.revision) title += " (r" + entry.revision + ")";
-    $("detail-title").textContent = title;
-
-    var decision = state.decisions[entry.asset_id] || "pending";
+  function renderDrawer(entry, reset) {
+    var drawer = $("details");
+    drawer.hidden = false;
+    $("detail-title").textContent = entry.name;
     var badge = $("detail-decision");
-    badge.className = "decision " + decision;
-    badge.textContent = decision;
+    badge.className = "decision " + entry.decision;
+    badge.textContent = decisionWord(entry.decision);
+    var img = $("detail-image");
+    img.hidden = false;
+    img.alt = entry.name;
+    var src = thumbUrl(entry, 1200);
+    if (img.getAttribute("src") !== src) img.src = src;
+    $("detail-score").textContent = entry.scored
+      ? "Score " + Number(entry.score).toFixed(2) + " · technical " +
+        Number(entry.technical).toFixed(2) + (entry.hung.length ? " · on the Frame" : "")
+      : "Not scored yet — run “Score all photos”.";
 
     var meta = $("detail-meta");
     var pairs = [
-      ["sha256", entry.sha256 || "—"],
-      ["quality", entry.quality_score != null ? Number(entry.quality_score).toFixed(2) : "—"],
-      ["reason", entry.quality_reason || "—"],
-      ["cluster", entry.cluster_id || "—"],
-      ["created", entry.created_at || "—"],
+      ["file", entry.asset_id],
+      ["sha256", entry.sha256],
+      ["decision", entry.decision],
     ];
+    entry.hung.forEach(function (h) {
+      pairs.push(["hung", h.artifact_id + " · " + h.adapter_id + " · " + h.target]);
+    });
     meta.replaceChildren.apply(
       meta,
       pairs.map(function (p) {
@@ -148,8 +342,36 @@
         return div;
       })
     );
+    if (reset) {
+      resetOutputs();
+      $("detail-layout").textContent = "Working out how it should hang…";
+      suggestLayout(entry);
+      drawer.scrollTop = 0;
+    }
+  }
 
-    resetOutputs();
+  var layoutRequest = 0;
+  async function suggestLayout(entry) {
+    var ticket = ++layoutRequest;
+    try {
+      var proposals = await post(
+        "/api/propose",
+        JSON.stringify({ asset: entry.sha256, target: $("target").value })
+      );
+      if (ticket !== layoutRequest) return;
+      if (!Array.isArray(proposals) || !proposals.length) {
+        $("detail-layout").textContent = "No layout suggested for this photo.";
+        return;
+      }
+      var top = proposals[0];
+      var why = Array.isArray(top.rationale) && top.rationale.length ? top.rationale[0] : "";
+      $("detail-layout").textContent =
+        "Hangs as " + String(top.treatment).replace(/_/g, " ") + (why ? " — " + why : "");
+      renderProposals(proposals);
+    } catch (err) {
+      if (ticket !== layoutRequest) return;
+      $("detail-layout").textContent = "Could not suggest a layout: " + err.message;
+    }
   }
 
   function resetOutputs() {
@@ -169,7 +391,7 @@
 
   function requireSelection() {
     if (!state.selected) {
-      throw new Error("Select a catalog entry first.");
+      throw new Error("Open a photo first.");
     }
     return state.selected;
   }
@@ -180,7 +402,191 @@
     }
   }
 
-  // -- actions ---------------------------------------------------------------
+  // -- jobs (load / score / publish) ------------------------------------------
+
+  function jobUI(name) {
+    return {
+      load: { progress: $("load-progress"), status: $("load-status"), button: $("load-button") },
+      score: { progress: $("score-progress"), status: $("score-status"), button: $("score-button") },
+      publish: { progress: $("hang-progress"), status: $("hang-status"), button: $("hang-button") },
+    }[name];
+  }
+
+  function showJob(name, job) {
+    var ui = jobUI(name);
+    var running = job.state === "running";
+    ui.button.disabled = running;
+    ui.progress.hidden = !running;
+    if (running) {
+      if (job.total > 0) {
+        ui.progress.max = job.total;
+        ui.progress.value = job.done;
+        ui.status.textContent =
+          job.done + " of " + job.total + (job.current ? " · " + job.current : "");
+      } else {
+        ui.progress.removeAttribute("value");
+        ui.status.textContent = job.current || "Working…";
+      }
+    }
+    ui.status.classList.toggle("error", job.state === "error");
+    if (job.state === "error") ui.status.textContent = job.message || "Failed.";
+  }
+
+  function watchJob(name, url, onDone) {
+    if (state.watching[name]) return;
+    state.watching[name] = setInterval(async function () {
+      var job;
+      try {
+        job = await fetchJSON(url);
+      } catch (err) {
+        return; // transient; try again next tick
+      }
+      showJob(name, job);
+      if (job.state !== "running") {
+        clearInterval(state.watching[name]);
+        delete state.watching[name];
+        if (job.state === "done") onDone(job);
+        else showToast((job.message || name + " failed"), true);
+        await refresh();
+      }
+    }, 1000);
+  }
+
+  function resumeJobs(jobs) {
+    Object.keys(jobs || {}).forEach(function (name) {
+      var job = jobs[name];
+      if (job.state === "running") {
+        showJob(name, job);
+        watchJob(name, jobEndpoint(name), jobDone(name));
+      }
+    });
+  }
+
+  function jobEndpoint(name) {
+    return { load: "/api/load", score: "/api/score", publish: "/api/publish" }[name];
+  }
+
+  function jobDone(name) {
+    return { load: loadDone, score: scoreDone, publish: hangDone }[name];
+  }
+
+  async function startJob(name, body) {
+    var ui = jobUI(name);
+    try {
+      var job = await post(jobEndpoint(name), JSON.stringify(body));
+      showJob(name, job);
+      if (job.state === "running") watchJob(name, jobEndpoint(name), jobDone(name));
+      else if (job.state === "done") { jobDone(name)(job); await refresh(); }
+      else showToast(job.message || name + " failed", true);
+    } catch (err) {
+      ui.status.textContent = "";
+      showToast(err.message, true);
+    }
+  }
+
+  // stage 1
+  function loadDone(job) {
+    var r = job.result || {};
+    // The ingest report's counts, in the words a person would use.
+    var said = [
+      [r.indexed_count, "added"],
+      [r.unsupported_count, "unsupported (RAW or unreadable)"],
+      [r.corrupt_count, "corrupt"],
+      [r.error_count, "failed"],
+    ].filter(function (pair) { return typeof pair[0] === "number" && pair[0] > 0; })
+     .map(function (pair) { return pair[0] + " " + pair[1]; });
+    if (!said.length && typeof r.total_enumerated === "number") {
+      said.push(r.total_enumerated === 0 ? "no photos found there" : "nothing new — already loaded");
+    }
+    $("load-status").textContent = "Loaded " + (r.folder || "") + (said.length ? " — " + said.join(", ") : "") + ".";
+    showToast("Folder loaded.");
+  }
+
+  // stage 2
+  function scoreDone(job) {
+    var r = job.result || {};
+    $("score-status").textContent = r.total === 0
+      ? "Every photo is already scored."
+      : "Scored " + r.scored + " of " + r.total + (r.failed ? " · " + r.failed + " could not be read" : "") + ".";
+    showToast(r.total === 0 ? "Nothing new to score." : "Scored " + r.scored + " photos.");
+  }
+
+  // stage 3
+  function renderDestinations(destinations) {
+    var select = $("destination");
+    var current = select.value;
+    select.replaceChildren.apply(
+      select,
+      destinations.map(function (d) {
+        var option = el("option", null, d.label + (d.available ? "" : " — not available"));
+        option.value = d.id;
+        option.disabled = !d.available;
+        return option;
+      })
+    );
+    var ids = destinations.map(function (d) { return d.id; });
+    select.value = ids.indexOf(current) !== -1 && current ? current : "folder";
+    destinationChanged();
+  }
+
+  function destinationChanged() {
+    var id = $("destination").value;
+    var chosen = (state.wall ? state.wall.destinations : []).filter(function (d) {
+      return d.id === id;
+    })[0];
+    var folderInput = $("destination-folder");
+    folderInput.hidden = id !== "folder";
+    var note = $("destination-note");
+    if (!chosen) {
+      note.textContent = "";
+    } else if (!chosen.available) {
+      note.textContent = chosen.reason;
+    } else if (chosen.id === "folder") {
+      note.textContent = "Files land in " + (folderInput.value || chosen.location) + ". Copy that folder to a USB stick and the Frame will show it.";
+    } else {
+      note.textContent = chosen.location === "in-memory"
+        ? "A test target: it remembers what was hung until the server restarts."
+        : chosen.location;
+    }
+  }
+
+  function renderHangSummary(counts) {
+    var button = $("hang-button");
+    button.textContent = counts.approved
+      ? "Hang " + plural(counts.approved, "approved photo", "approved photos")
+      : "Hang approved photos";
+    button.disabled = counts.approved === 0 || Boolean(state.watching.publish);
+    $("hang-summary").textContent = counts.approved
+      ? ""
+      : "Approve at least one photo first.";
+  }
+
+  function hangDone(job) {
+    var r = job.result || {};
+    var status = $("hang-status");
+    status.textContent =
+      "Hung " + r.hung + " of " + r.approved +
+      (r.skipped ? " · " + r.skipped + " already there" : "") +
+      (r.failed ? " · " + r.failed + " skipped, see below" : "") +
+      (r.location && r.location !== "in-memory" ? " · saved to " + r.location : "") + ".";
+    var list = $("hang-results");
+    list.replaceChildren.apply(
+      list,
+      (r.items || []).map(function (item) {
+        var li = el("li", "hang-item " + item.status);
+        var text;
+        if (item.status === "hung") text = item.name + " — hung as " + String(item.treatment).replace(/_/g, " ");
+        else if (item.status === "skipped") text = item.name + " — already there";
+        else if (item.status === "unpublishable") text = item.name + " — not publishable: " + (item.reasons || []).join("; ");
+        else text = item.name + " — " + (item.error || "failed");
+        li.textContent = text;
+        return li;
+      })
+    );
+    showToast(r.hung ? "Hung " + r.hung + " photos." : "Nothing was hung.", !r.hung);
+  }
+
+  // -- more tools (the old bench, unchanged in behavior) ----------------------
 
   async function runAction(name, fn, onDone) {
     var label = name.charAt(0).toUpperCase() + name.slice(1);
@@ -198,14 +604,6 @@
 
   function bodyFor(extra) {
     return JSON.stringify(Object.assign({ asset: state.selected.sha256 }, extra));
-  }
-
-  function post(url, body) {
-    return fetchJSON(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: body,
-    });
   }
 
   async function analyze() {
@@ -226,6 +624,10 @@
     return div;
   }
 
+  function round(n) {
+    return n === undefined || n === null ? "—" : Number(n).toFixed(3);
+  }
+
   function renderAnalysis(data) {
     assertOk(data);
     var quality = data.quality || {};
@@ -234,7 +636,6 @@
     summary.textContent =
       "Profile " + (data.metadata && data.metadata.profile) + " · asset " +
       String(data.asset_id).slice(0, 12) + "…";
-
     var body = $("analysis-body");
     var metrics = [
       ["technical", round(quality.technical_quality)],
@@ -242,10 +643,7 @@
       ["sharpness", round(quality.sharpness)],
       ["exposure", round(quality.exposure)],
       ["contrast", round(quality.contrast)],
-      [
-        "resolution ok",
-        quality.resolution_sufficient ? "yes" : "no",
-      ],
+      ["resolution ok", quality.resolution_sufficient ? "yes" : "no"],
     ];
     body.replaceChildren.apply(
       body,
@@ -267,10 +665,6 @@
     );
   }
 
-  function round(n) {
-    return n === undefined || n === null ? "—" : Number(n).toFixed(3);
-  }
-
   function renderProposals(data) {
     assertOk(data);
     var proposals = Array.isArray(data) ? data : [];
@@ -282,33 +676,30 @@
     }
     summary.className = "";
     summary.textContent = proposals.length + " treatment(s) proposed.";
-
     var list = $("proposals-list");
-    var items = proposals.map(function (p) {
-      var li = el("li");
-      var head = el("div");
-      var treatment = el("span", "treatment", p.treatment);
-      var scoreSpan = el(
-        "span",
-        "score",
-        " — score " + round(p.score) + (p.evidence ? " · " + String(p.evidence).slice(0, 60) : "")
-      );
-      head.append(treatment, scoreSpan);
-      li.append(head);
-
-      if (Array.isArray(p.rationale) && p.rationale.length) {
-        var ul = el("ul");
-        ul.append.apply(
-          ul,
-          p.rationale.map(function (r) {
-            return el("li", null, String(r));
-          })
+    list.replaceChildren.apply(
+      list,
+      proposals.map(function (p) {
+        var li = el("li");
+        var head = el("div");
+        head.append(
+          el("span", "treatment", p.treatment),
+          el("span", "score", " — score " + round(p.score))
         );
-        li.append(ul);
-      }
-      return li;
-    });
-    list.replaceChildren.apply(list, items);
+        li.append(head);
+        if (Array.isArray(p.rationale) && p.rationale.length) {
+          var ul = el("ul");
+          ul.append.apply(
+            ul,
+            p.rationale.map(function (r) {
+              return el("li", null, String(r));
+            })
+          );
+          li.append(ul);
+        }
+        return li;
+      })
+    );
   }
 
   async function renderTo(targetName) {
@@ -324,17 +715,22 @@
     );
   }
 
+  function humanBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + " B";
+    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1048576).toFixed(1) + " MB";
+  }
+
   function renderRenderResult(data, targetName) {
     assertOk(data);
     state.lastRender = { sha: data.sha256, target: targetName, size: data.size_bytes };
     $("validate").disabled = false;
-
     var summary = $("render-summary");
     summary.className = "";
     summary.textContent =
       "Rendered " + data.treatment + " → " + data.target_width + "×" + data.target_height +
       (data.upscaled_warning ? " (UPSCALED — review quality)" : "");
-
     var body = $("render-body");
     var rows = [
       ["target", data.target_width + "×" + data.target_height],
@@ -343,9 +739,7 @@
       ["size", humanBytes(data.size_bytes)],
       ["renderer", data.renderer_version],
     ];
-    if (data.notes && data.notes.length) {
-      rows.push(["notes", data.notes.join("; ")]);
-    }
+    if (data.notes && data.notes.length) rows.push(["notes", data.notes.join("; ")]);
     var grid = el("div", "render-result");
     grid.append.apply(
       grid,
@@ -355,7 +749,10 @@
         return div;
       })
     );
-    body.replaceChildren(grid);
+    var preview = el("img", "render-preview");
+    preview.src = "/api/thumb/" + data.sha256 + "?w=960";
+    preview.alt = "Rendered " + data.treatment;
+    body.replaceChildren(grid, preview);
   }
 
   async function validate() {
@@ -385,132 +782,16 @@
     summary.textContent =
       (data.publishable ? "Publishable." : "NOT publishable.") +
       " valid=" + (data.valid ? "yes" : "no");
-
     var body = $("validate-body");
     var checks = (data.checks || []).map(function (check) {
       var div = el("div", "check " + (check.passed ? "pass" : "fail"));
-      var mark = el("span", "mark", check.passed ? "✓" : "✗");
-      var name = el("span", "name", check.name);
-      div.append(mark, name);
-      if (check.reason) {
-        var reason = el("span", "muted", " — " + check.reason);
-        div.append(reason);
-      }
+      div.append(el("span", "mark", check.passed ? "✓" : "✗"), el("span", "name", check.name));
+      if (check.reason) div.append(el("span", "muted", " — " + check.reason));
       return div;
     });
     var report = el("div", "validate-report");
     report.append.apply(report, checks);
     body.replaceChildren(report);
-  }
-
-  function reviewAction(action, assetId) {
-    return function () {
-      if (!assetId) {
-        setStatus("Select a catalog entry first.", true);
-        return;
-      }
-      return runAction(
-        action,
-        function () {
-          return post("/api/review/" + action, JSON.stringify({ asset: assetId }));
-        },
-        function (data) {
-          state.decisions[assetId] = data.decision || "pending";
-          renderCards();
-          renderDetails();
-          renderReview();
-        }
-      );
-    };
-  }
-
-  function humanBytes(n) {
-    n = Number(n) || 0;
-    if (n < 1024) return n + " B";
-    if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
-    return (n / 1048576).toFixed(1) + " MB";
-  }
-
-  // -- review queue (M004/S03 T2) ------------------------------------------
-
-  function reviewRow(item) {
-    var decision = item.decision || "pending";
-    var row = el("li", "review-row");
-    row.setAttribute("role", "listitem");
-
-    row.append(el("span", "review-name", item.asset_id));
-
-    var badge = el("span", "decision " + decision, decision);
-    row.append(badge);
-
-    var actions = el("div", "review-actions");
-    actions.setAttribute("role", "group");
-    actions.setAttribute("aria-label", "Review actions for " + item.asset_id);
-
-    var approve = el("button", "btn approve small", "Approve");
-    approve.type = "button";
-    approve.setAttribute(
-      "aria-label",
-      "Approve " + item.asset_id
-    );
-    approve.addEventListener("click", reviewAction("approve", item.asset_id));
-
-    var reject = el("button", "btn reject small", "Reject");
-    reject.type = "button";
-    reject.setAttribute("aria-label", "Reject " + item.asset_id);
-    reject.addEventListener("click", reviewAction("reject", item.asset_id));
-
-    var undo = el("button", "btn small", "Undo");
-    undo.type = "button";
-    undo.setAttribute(
-      "aria-label",
-      "Undo decision for " + item.asset_id
-    );
-    undo.addEventListener("click", reviewAction("undo", item.asset_id));
-
-    actions.append(approve, reject, undo);
-    row.append(actions);
-
-    if (Array.isArray(item.history) && item.history.length) {
-      var history = el(
-        "span",
-        "review-history",
-        "history: " + item.history.join(" · ")
-      );
-      row.append(history);
-    }
-    return row;
-  }
-
-  function renderReview() {
-    var list = $("review-list");
-    var filter = state.reviewFilter;
-    var rows = state.reviewEntries.filter(function (item) {
-      var d = item.decision || "pending";
-      if (filter === "all") return true;
-      return d === filter;
-    });
-    var status = $("review-status");
-    status.textContent = rows.length + " entr" + (rows.length === 1 ? "y" : "ies") +
-      " (" + (filter === "all" ? "all decisions" : filter) + ").";
-
-    if (!rows.length) {
-      var empty = el("li", "empty", "No entries with this decision.");
-      empty.setAttribute("role", "listitem");
-      list.replaceChildren(empty);
-      return;
-    }
-    var items = rows.map(reviewRow);
-    list.replaceChildren.apply(list, items);
-  }
-
-  function setFilter(filter) {
-    state.reviewFilter = filter;
-    ["pending", "approved", "rejected", "all"].forEach(function (key) {
-      var btn = $("filter-" + key);
-      if (btn) btn.setAttribute("aria-pressed", key === filter ? "true" : "false");
-    });
-    renderReview();
   }
 
   // -- taste dialogue --------------------------------------------------------
@@ -701,10 +982,14 @@
     }
   }
 
-  // -- taste deck (M009/S01) --------------------------------------------------
+  // -- taste deck (M009/S01; pictures instead of labels since M011/S02) -------
 
-  function candidateLabel(cand) {
-    return "entry " + cand.entry_id + " · " + cand.sha256.slice(0, 12);
+  function candidateFigure(container, cand, letter) {
+    container.replaceChildren();
+    var img = el("img");
+    img.src = "/api/thumb/" + cand.sha256 + "?w=480";
+    img.alt = "Photo " + letter;
+    container.append(img, el("span", "pair-letter", letter));
   }
 
   function renderTasteDeck(pair) {
@@ -717,8 +1002,8 @@
     }
     empty.hidden = true;
     body.hidden = false;
-    $("taste-deck-a").textContent = candidateLabel(pair.a);
-    $("taste-deck-b").textContent = candidateLabel(pair.b);
+    candidateFigure($("taste-deck-a"), pair.a, "A");
+    candidateFigure($("taste-deck-b"), pair.b, "B");
   }
 
   async function loadTastePair() {
@@ -776,54 +1061,50 @@
     }
   }
 
-  // -- view switching --------------------------------------------------------
+  // -- wiring + boot ---------------------------------------------------------
 
-  function showView(view) {
-    $("catalog-view").hidden = view !== "catalog";
-    $("review-view").hidden = view !== "review";
-    $("taste-view").hidden = view !== "taste";
-    var navs = { catalog: $("nav-catalog"), review: $("nav-review"), taste: $("nav-taste") };
-    Object.keys(navs).forEach(function (key) {
-      if (key === view) {
-        navs[key].setAttribute("aria-current", "page");
-      } else {
-        navs[key].removeAttribute("aria-current");
-      }
-    });
-    if (view === "review") renderReview();
-    if (view === "taste") {
-      loadTasteProfile();
-      loadTastePair();
+  $("load-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var path = $("load-path").value.trim();
+    if (!path) {
+      showToast("Type the folder to load first.", true);
+      $("load-path").focus();
+      return;
     }
-  }
+    startJob("load", { path: path });
+  });
+  $("score-button").addEventListener("click", function () {
+    startJob("score", {});
+  });
+  $("hang-button").addEventListener("click", function () {
+    var body = { destination: $("destination").value, output: $("target").value };
+    var folder = $("destination-folder").value.trim();
+    if (body.destination === "folder" && folder) body.folder = folder;
+    $("hang-results").replaceChildren();
+    startJob("publish", body);
+  });
+  $("destination").addEventListener("change", destinationChanged);
+  $("destination-folder").addEventListener("input", destinationChanged);
 
-  // -- boot ------------------------------------------------------------------
-
-  async function loadReview() {
-    var review = await fetchJSON("/api/review");
-    state.reviewEntries = review;
-    state.decisions = {};
-    review.forEach(function (r) {
-      state.decisions[r.asset_id] = r.decision || "pending";
+  ["pending", "approved", "rejected", "all"].forEach(function (key) {
+    $("filter-" + key).addEventListener("click", function () {
+      setFilter(key);
     });
-  }
+  });
 
-  async function loadCatalog() {
-    setStatus("Loading catalog…");
-    try {
-      var entries = await fetchJSON("/catalog");
-      await loadReview();
-      state.entries = entries;
-      state.reviewEntries = state.reviewEntries || [];
-      renderCards();
-      renderReview();
-      setStatus(entries.length + " catalog entr" + (entries.length === 1 ? "y" : "ies") + ".");
-    } catch (err) {
-      setStatus("Failed to load catalog.", true);
-      showToast(err.message, true);
-    }
-  }
-
+  $("detail-close").addEventListener("click", closeDrawer);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && state.selected) closeDrawer();
+  });
+  $("approve").addEventListener("click", function () {
+    if (state.selected) decide("approve", state.selected);
+  });
+  $("reject").addEventListener("click", function () {
+    if (state.selected) decide("reject", state.selected);
+  });
+  $("undo").addEventListener("click", function () {
+    if (state.selected) decide("undo", state.selected);
+  });
   $("analyze").addEventListener("click", analyze);
   $("propose").addEventListener("click", propose);
   $("render-1080p").addEventListener("click", function () {
@@ -833,28 +1114,16 @@
     renderTo("4k");
   });
   $("validate").addEventListener("click", validate);
-  $("approve").addEventListener("click", function () {
-    return reviewAction("approve", state.selected ? state.selected.asset_id : null)();
-  });
-  $("reject").addEventListener("click", function () {
-    return reviewAction("reject", state.selected ? state.selected.asset_id : null)();
-  });
-  $("undo").addEventListener("click", function () {
-    return reviewAction("undo", state.selected ? state.selected.asset_id : null)();
+
+  ["catalog", "review", "taste"].forEach(function (key) {
+    $("nav-" + key).addEventListener("click", function () {
+      ["catalog", "review", "taste"].forEach(function (other) {
+        if (other === key) $("nav-" + other).setAttribute("aria-current", "page");
+        else $("nav-" + other).removeAttribute("aria-current");
+      });
+    });
   });
 
-  $("nav-catalog").addEventListener("click", function (e) {
-    e.preventDefault();
-    showView("catalog");
-  });
-  $("nav-review").addEventListener("click", function (e) {
-    e.preventDefault();
-    showView("review");
-  });
-  $("nav-taste").addEventListener("click", function (e) {
-    e.preventDefault();
-    showView("taste");
-  });
   $("taste-submit").addEventListener("click", submitReaction);
   $("taste-prefer-a").addEventListener("click", function () {
     submitVote("a");
@@ -862,11 +1131,14 @@
   $("taste-prefer-b").addEventListener("click", function () {
     submitVote("b");
   });
-  ["pending", "approved", "rejected", "all"].forEach(function (key) {
-    $("filter-" + key).addEventListener("click", function () {
-      setFilter(key);
-    });
+  $("taste-deck-a").addEventListener("click", function () {
+    submitVote("a");
+  });
+  $("taste-deck-b").addEventListener("click", function () {
+    submitVote("b");
   });
 
-  loadCatalog();
+  refresh();
+  loadTasteProfile();
+  loadTastePair();
 })();

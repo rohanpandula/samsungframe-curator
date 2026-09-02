@@ -66,6 +66,7 @@ import binascii
 import dataclasses
 import re
 import tempfile
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -379,6 +380,7 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         version="0.1.0",
     )
     app.state.catalog = catalog
+    app.state.catalog_lock = threading.Lock()
     # One Wall (M011/S01): the in-process job runner and the per-process simulator
     # destination, so 'hung on the simulator' persists for the server's lifetime.
     app.state.wall_jobs = JobRunner()
@@ -387,11 +389,22 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
     # -- helpers ---------------------------------------------------------------
 
     def _catalog(request: Request) -> Catalog:
-        """Return the app's Catalog, resolving the default lazily on first use."""
+        """Return the app's Catalog, resolving the default lazily on first use.
+
+        Resolution is serialized (M011/S02): a page's first paint fires several
+        requests at once, and on a brand-new data root each of them used to
+        construct its own Catalog and run the schema migration concurrently —
+        the non-idempotent ``ALTER TABLE ... ADD COLUMN`` steps then lost the
+        race with ``duplicate column name`` 500s. One thread migrates; the rest
+        wait for it and share the result.
+        """
         resolved = request.app.state.catalog
         if resolved is None:
-            resolved = Catalog()  # honors CURATOR_DATA_ROOT at request time
-            request.app.state.catalog = resolved
+            with request.app.state.catalog_lock:
+                resolved = request.app.state.catalog
+                if resolved is None:
+                    resolved = Catalog()  # honors CURATOR_DATA_ROOT at request time
+                    request.app.state.catalog = resolved
         return resolved
 
     # -- endpoints -------------------------------------------------------------
@@ -442,6 +455,22 @@ def create_app(catalog: Catalog | None = None) -> FastAPI:
         StaticFiles(directory=WEBUI_DIR, html=True),
         name="webui",
     )
+
+    @app.middleware("http")
+    async def _revalidate_webui(request: Request, call_next: Callable) -> Any:
+        """Make browsers revalidate the SPA's files on every load (M011/S02).
+
+        StaticFiles sends ETag/Last-Modified but no Cache-Control, so browsers
+        apply heuristic freshness (a tenth of the file's age) and keep serving a
+        weeks-old app.js after a redeploy — the page then runs old script against
+        new markup. ``no-cache`` still allows caching; it just forces the
+        conditional request, which is a 304 when nothing changed.
+        """
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.startswith("/app"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     # -- review surfaces --------------------------------------------------------
 

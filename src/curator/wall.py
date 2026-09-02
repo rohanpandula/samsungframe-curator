@@ -87,6 +87,11 @@ def thumbnail_bytes(data: bytes, max_side: int) -> bytes:
     """
     try:
         with Image.open(io.BytesIO(data)) as opened:
+            # JPEG draft mode decodes at a reduced DCT scale (>= 2x the target on
+            # each side) instead of materializing an 80-megapixel frame just to
+            # shrink it — tens of times faster on camera originals; a no-op for
+            # formats that cannot draft.
+            opened.draft("RGB", (max_side * 2, max_side * 2))
             image = ImageOps.exif_transpose(opened).convert("RGB")
     except Exception as exc:  # PIL raises many types for malformed input
         raise CuratorError(f"cannot decode image for thumbnail: {exc}") from exc

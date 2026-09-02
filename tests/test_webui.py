@@ -671,3 +671,31 @@ def test_schema_v7_migration_applies_renders_table(data_root, catalog):
     assert "artifact_sha" in ddl[0][0]
     assert "render_json" in ddl[0][0]
     assert "renderer_version" in ddl[0][0]
+
+
+def test_first_requests_on_a_fresh_data_root_do_not_race_the_migration(data_root):
+    """M011/S02: the page's first paint fires several requests at once.
+
+    Without serialized lazy resolution each request constructed its own Catalog
+    and ran the migration concurrently; the ALTER TABLE steps then failed with
+    ``duplicate column name`` and the page showed 500s on a brand-new install.
+    """
+    import threading
+
+    app = create_app()  # no catalog: resolved lazily from CURATOR_DATA_ROOT
+    client = TestClient(app)
+    statuses: list[int] = []
+    lock = threading.Lock()
+
+    def hit(path: str) -> None:
+        code = client.get(path).status_code
+        with lock:
+            statuses.append(code)
+
+    paths = ["/api/wall", "/api/taste/profile", "/api/taste/pair", "/health", "/catalog"] * 3
+    threads = [threading.Thread(target=hit, args=(path,)) for path in paths]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert statuses and all(code == 200 for code in statuses), statuses
