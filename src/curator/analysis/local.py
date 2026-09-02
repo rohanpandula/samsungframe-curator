@@ -65,7 +65,17 @@ from curator.analysis.schema import (
 )
 
 #: Engine version reported in every :class:`AnalysisMetadata`.
-ENGINE_VERSION = "local-1.0.0"
+ENGINE_VERSION = "local-1.1.0"
+
+#: Longest side, in pixels, at which every signal is computed (M011/S01). A frame
+#: larger than this is resampled (LANCZOS, deterministic) before analysis; one at
+#: or under it is analyzed untouched, so every pre-M011 fixture and persisted
+#: result is byte-identical. The original dimensions still drive the resolution
+#: sufficiency check — a 60-megapixel scan is not "small" because it was analyzed
+#: at 2048 px. Bumped the engine to 1.1.0 because a >2048 px input now yields a
+#: different (much faster: 38s -> ~1s on an 82-megapixel scan) but equally
+#: deterministic result.
+WORKING_MAX_SIDE = 2048
 
 #: Default model specification describing this deterministic reference engine.
 _MODEL_SPEC: dict[str, Any] = {
@@ -178,12 +188,21 @@ def _colorfulness(rgb: np.ndarray) -> float:
 
 
 class _ImageData:
-    """Decoded, orientation-corrected image as numpy arrays plus dims."""
+    """Decoded, orientation-corrected image as numpy arrays plus dims.
 
-    def __init__(self, pil: Image.Image, asset_id: str) -> None:
+    ``width``/``height`` are the dimensions of the arrays every signal reads
+    (the working copy, at most :data:`WORKING_MAX_SIDE` on the long side);
+    ``source_width``/``source_height`` are the decoded original's, for the one
+    signal that is about the file rather than its content: resolution sufficiency.
+    """
+
+    def __init__(
+        self, pil: Image.Image, asset_id: str, source_size: tuple[int, int] | None = None
+    ) -> None:
         self.pil = pil
         self.asset_id = asset_id
         self.width, self.height = pil.size
+        self.source_width, self.source_height = source_size if source_size else pil.size
         self.rgb: np.ndarray = np.asarray(pil, dtype=np.float32) / 255.0
         self.gray: np.ndarray = np.asarray(pil.convert("L"), dtype=np.float32) / 255.0
 
@@ -242,7 +261,8 @@ class LocalAnalysisProvider(AnalysisProvider):
         asset = asset_id if asset_id is not None else self._default_asset_id(data)
         stages = {s.stage for s in profile_specs(profile)}
 
-        img = _ImageData(pil, asset)
+        source_size = pil.size
+        img = _ImageData(_bounded(pil), asset, source_size=source_size)
         feats = self._features_for(img)
 
         perceptual = (
@@ -428,9 +448,9 @@ class LocalAnalysisProvider(AnalysisProvider):
         exposure = _clamp01(1.0 - abs(float(0.5 * (p10 + p90)) - 0.5) * 2.0)
         contrast = _clamp01(_saturate(float(img.gray.std()), 0.5))
 
-        res_sufficient = img.width >= _1080P[0] and img.height >= _1080P[1]
+        res_sufficient = img.source_width >= _1080P[0] and img.source_height >= _1080P[1]
         res_factor = 1.0 if res_sufficient else _clamp01(
-            min(img.width / _1080P[0], img.height / _1080P[1])
+            min(img.source_width / _1080P[0], img.source_height / _1080P[1])
         )
 
         technical_quality = _clamp01(
@@ -738,6 +758,18 @@ class LocalAnalysisProvider(AnalysisProvider):
 # ---------------------------------------------------------------------------
 # pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _bounded(pil: Image.Image) -> Image.Image:
+    """Return *pil* unchanged when its long side is <= WORKING_MAX_SIDE, else a
+    LANCZOS downscale to exactly that long side (aspect kept, floor-rounded)."""
+    width, height = pil.size
+    longest = max(width, height)
+    if longest <= WORKING_MAX_SIDE:
+        return pil
+    scale = WORKING_MAX_SIDE / float(longest)
+    size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    return pil.resize(size, Image.Resampling.LANCZOS)
 
 
 def _hash_bits(pil: Image.Image, fn: Any) -> list[int]:

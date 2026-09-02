@@ -216,3 +216,25 @@ def test_textured_image_analyzes_in_seconds_not_minutes() -> None:
     started = time.perf_counter()
     LocalAnalysisProvider().analyze(buf.getvalue(), AnalysisProfile.BALANCED, asset_id="noise")
     assert time.perf_counter() - started < 15.0
+
+
+def test_large_frames_are_analyzed_at_the_working_resolution() -> None:
+    """M011/S01: >2048 px inputs are resampled for the signals, never for the
+    resolution check — and a frame at or under the cap is analyzed untouched."""
+    from curator.analysis.local import WORKING_MAX_SIDE, LocalAnalysisProvider, _bounded
+    from curator.analysis.profiles import AnalysisProfile
+
+    small = Image.new("RGB", (1600, 1200), (60, 90, 170))
+    assert _bounded(small) is small
+
+    big = Image.new("RGB", (5000, 3000), (60, 90, 170))
+    ImageDraw.Draw(big).rectangle([600, 500, 2800, 2400], fill=(210, 180, 60))
+    bounded = _bounded(big)
+    assert max(bounded.size) == WORKING_MAX_SIDE
+    assert bounded.size == (2048, 1228)
+
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    result = LocalAnalysisProvider().analyze(buf.getvalue(), AnalysisProfile.BALANCED, asset_id="big")
+    assert result.quality.resolution_sufficient is True  # judged on 5000x3000, not 2048x1228
+    assert result.metadata.engine_version == "local-1.1.0"
