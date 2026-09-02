@@ -151,8 +151,11 @@ from curator.artdirection.manifest import (
 )
 from curator.artdirection.packing import resolve_regions
 from curator.artdirection.policy import (
+    DIPTYCH_AFFINITY,
+    NUP_AFFINITY,
     ArtDirectionRequest,
     TreatmentProposal,
+    _group_affinity,
     materialize_manifest,
     propose_treatments,
 )
@@ -1139,12 +1142,25 @@ def _analyze_all_or_reuse(
     falls back per comparison to the stored ``pairing.affinity``. Returns the
     ranked :class:`TreatmentProposal` list for the whole group.
     """
+    results, provider = _results_or_reuse(catalog, entry_ids, sources)
+    return propose_treatments(results, request, provider=provider)
+
+
+def _results_or_reuse(
+    catalog: Catalog, entry_ids: list[int], sources: list[str]
+) -> tuple[list[AnalysisResult], LocalAnalysisProvider]:
+    """Return one :class:`AnalysisResult` per asset plus the provider that made them.
+
+    The analysis half of :func:`_analyze_all_or_reuse`, split out so
+    :func:`_no_proposal_cause` can compute the same group affinity the policy
+    engine gated on without re-running the engine (M010 audit).
+    """
     provider = LocalAnalysisProvider()
     results: list[AnalysisResult] = []
     for entry_id, source in zip(entry_ids, sources, strict=True):
         persisted = _load_analysis(catalog, entry_id)
         results.append(persisted if persisted is not None else provider.analyze(source))
-    return propose_treatments(results, request, provider=provider)
+    return results, provider
 
 
 #: Named once so every ``curator group`` not-available message points at the same
@@ -1382,8 +1398,55 @@ def _select_proposal(
         raise CuratorError(
             f"no proposal available to manifest {len(sources)} source(s) for "
             f"catalog entry {entry_id}"
+            f"{_no_proposal_cause(catalog, entry_ids, treatment, sources)}"
         )
     return usable[0]
+
+
+def _no_proposal_cause(
+    catalog: Catalog, entry_ids: list[int], treatment: str | None, sources: list[str]
+) -> str:
+    """Name why an explicitly requested multi-cell *treatment* had no proposal.
+
+    Every other rejection this milestone added names its cause; this one did
+    not (M010 milestone audit, integration finding F1): a user who hands
+    ``curator manifest --treatment packed`` a group the policy engine's affinity
+    gate declined was told only that "no proposal" existed. The engine never
+    proposes a multi-cell treatment below its gate — ``DIPTYCH_AFFINITY`` for a
+    diptych, ``NUP_AFFINITY`` for triptych/quad/packed — and ``--treatment`` only
+    selects among proposals that exist, so the honest answer is the measured
+    affinity against the gate that declined it. A fixed-width template handed
+    the wrong count is named as such instead. Returns ``""`` when the cause is
+    something else (no treatment requested, a single-cell treatment, an unknown
+    name) so the generic message stands alone.
+    """
+    if treatment is None:
+        return ""
+    try:
+        requested = LayoutTreatment(treatment)
+    except ValueError:
+        return ""
+    if requested not in MULTI_CELL_TREATMENTS:
+        return ""
+    required = _TREATMENT_SOURCE_COUNT.get(requested)
+    if required is not None and required != len(sources):
+        return f" — {treatment} lays out exactly {required} sources, got {len(sources)}"
+    if not 2 <= len(sources) <= MAX_LAYOUT_SOURCES:
+        return ""
+    results, provider = _results_or_reuse(catalog, entry_ids, sources)
+    affinity = _group_affinity(results, provider)
+    gate_name, gate = (
+        ("DIPTYCH_AFFINITY", DIPTYCH_AFFINITY)
+        if requested is LayoutTreatment.DIPTYCH
+        else ("NUP_AFFINITY", NUP_AFFINITY)
+    )
+    if affinity < gate:
+        return (
+            f" — the group's mean pairing affinity is {affinity:.2f}, below "
+            f"{gate_name} {gate:.2f}, so no {treatment} was proposed; choose a more "
+            f"cohesive group"
+        )
+    return ""
 
 
 def _lays_out(treatment: LayoutTreatment, source_count: int) -> bool:

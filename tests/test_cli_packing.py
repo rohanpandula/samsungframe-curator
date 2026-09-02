@@ -97,6 +97,24 @@ def _crop_risky_first_of_three(tmp_path) -> list[str]:
     return paths
 
 
+def _unrelated_folder(tmp_path, count: int) -> list[str]:
+    """Ingest *count* frames with nothing in common — a group no N-up gate accepts."""
+    folder = tmp_path / "unrelated"
+    folder.mkdir()
+    paths = []
+    palettes = [(230, 30, 30), (30, 200, 60), (20, 40, 220), (240, 220, 40)]
+    for index in range(count):
+        asset = folder / f"frame{index}.png"
+        img = Image.new("RGB", (1600, 1200), palettes[index % len(palettes)])
+        draw = ImageDraw.Draw(img)
+        for stripe in range(0, 1600, 80 * (index + 1)):
+            draw.rectangle([stripe, 0, stripe + 20, 1200], fill=(255 - 60 * index,) * 3)
+        img.save(asset)
+        paths.append(str(asset.resolve()))
+    assert cli.main(["ingest", str(folder)]) == 0
+    return paths
+
+
 def _json_out(capsys):
     """Return the JSON document the last CLI command printed."""
     return json.loads(capsys.readouterr().out)
@@ -257,7 +275,28 @@ def test_manifest_rejects_a_template_that_cannot_lay_out_the_assets(
     capsys.readouterr()
 
     assert cli.main(["manifest", *assets, "--treatment", "triptych", "--json"]) == 2
-    assert "no proposal available" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no proposal available" in err
+    assert "triptych lays out exactly 3 sources, got 2" in err
+
+
+def test_manifest_names_the_affinity_gate_when_a_packed_layout_was_never_proposed(
+    data_root, tmp_path, capsys
+):
+    """M010 audit F1: the "no proposal" error names the gate that declined the group.
+
+    ``--treatment`` only selects among proposals that exist, and the policy engine
+    never proposes a multi-cell treatment below ``NUP_AFFINITY`` — so the honest
+    answer is the measured affinity against that gate, not a bare "no proposal".
+    """
+    assets = _unrelated_folder(tmp_path, 3)
+    capsys.readouterr()
+
+    assert cli.main(["manifest", *assets, "--treatment", "packed", "--json"]) == 2
+    err = capsys.readouterr().err
+    assert "no proposal available" in err
+    assert "below NUP_AFFINITY" in err
+    assert "no packed was proposed" in err
 
 
 def test_manifest_rejects_a_single_cell_treatment_for_three_assets(
